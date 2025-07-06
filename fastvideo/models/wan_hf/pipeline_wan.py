@@ -385,6 +385,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         max_sequence_length: int = 512,
         cus_timesteps=None,
         cfg_scales = None,
+        t_start=-1,
     ):
         r"""
         The call function to the pipeline for generation.
@@ -527,6 +528,9 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
+                    continue
+
+                if i<=t_start:
                     continue
                 
                 t = t.to(tde)

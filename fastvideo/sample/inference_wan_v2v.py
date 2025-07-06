@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from diffusers import BitsAndBytesConfig
+from diffusers import AutoencoderKLWan
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import FromOriginalModelMixin, PeftAdapterMixin
 from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
@@ -38,6 +39,9 @@ from diffusers.utils import (
 )
 
 from peft import LoraConfig
+import torchvision
+import torchvision.transforms.functional as TF
+from einops import rearrange
 
 from fastvideo.models.hunyuan_hf.modeling_hunyuan import HunyuanVideoTransformer3DModel
 from fastvideo.models.hunyuan_hf.pipeline_hunyuan import HunyuanVideoPipeline
@@ -314,6 +318,49 @@ def wan_forward(
 
         return Transformer2DModelOutput(sample=output)
 
+def load_mp4_as_tensor(
+    video_path: str,
+    max_frames: int = None,
+    resize_hw: tuple[int, int] = None,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """
+    Loads an .mp4 video and returns it as a PyTorch tensor with shape [C, T, H, W].
+
+    Args:
+        video_path (str): Path to the input .mp4 video file.
+        max_frames (int, optional): Maximum number of frames to load. If None, loads all.
+        resize_hw (tuple, optional): Target (height, width) to resize each frame. If None, no resizing.
+        normalize (bool, optional): Whether to normalize pixel values to [-1, 1].
+
+    Returns:
+        torch.Tensor: Tensor of shape [C, T, H, W], dtype=torch.float32
+    """
+    assert os.path.exists(video_path), f"Video file not found: {video_path}"
+
+    video, _, _ = torchvision.io.read_video(video_path, output_format="TCHW")
+    if max_frames is not None:
+        video = video[:max_frames]
+
+    video = rearrange(video, "t c h w -> c t h w")
+    h, w = video.shape[-2:]
+    aspect_ratio = h / w
+    assert 8 / 16 <= aspect_ratio <= 17 / 16, (
+        f"Unsupported aspect ratio: {aspect_ratio:.2f} for shape {video.shape}"
+    )
+    if resize_hw is not None:
+        c, t, h0, w0 = video.shape
+        video = torch.stack([
+            TF.resize(video[:, i], resize_hw, antialias=True)
+            for i in range(t)
+        ], dim=1)
+    if video.dtype != torch.float32:
+        video = video.float()
+    if normalize:
+        video = video / 127.5 - 1.0
+
+    return video  # Final shape: [C, T, H, W]
+
 
 def initialize_distributed():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -353,6 +400,22 @@ def inference(args):
         )
     pipe.transformer.add_adapter(transformer_lora_config, adapter_name="lora1")
     transformer.add_layer()
+
+    if args.t_start>-1:
+        model_id = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+        vae = AutoencoderKLWan.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float32).to("cuda")
+        latents=load_mp4_as_tensor(args.reference_video_path).unsqueeze(0)
+        latents = latents.to("cuda")
+        generator = torch.manual_seed(args.seed)
+        with torch.no_grad():
+            latents = vae.encode(latents,return_dict=False)[0].mean
+
+        scheduler.set_timesteps(num_inference_steps=args.num_inference_steps, device="cuda")
+        noise = torch.randn_like(latents)
+        timestep = scheduler.timesteps[args.t_start] 
+        latents = scheduler.add_noise(latents, noise, torch.tensor([timestep]).to("cuda"))
+    else:
+        latents = None
 
     from safetensors.torch import load_file as safetensors_load_file
     print('loading from....',args.model_path+'/transformer/diffusion_pytorch_model.safetensors')
@@ -424,7 +487,8 @@ def inference(args):
                     guidance_scale=args.guidance_scale,
                     generator = generator,
                     num_inference_steps=args.num_inference_steps,
-                    # cus_timesteps=[torch.tensor([1000]),torch.tensor([992]),torch.tensor([982]),torch.tensor([949]),torch.tensor([905]),torch.tensor([810])],
+                    latents=latents,
+                    t_start=args.t_start,
                     ).frames[0]
                 end_time = time.time()
                 generation_time = end_time - start_time
@@ -447,9 +511,11 @@ if __name__ == "__main__":
     parser.add_argument("--height", type=int, default=256)
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--num_inference_steps", type=int, default=4)
+    parser.add_argument("--t_start", type=int, default=-1)
     parser.add_argument("--model_path", type=str, default="data/hunyuan")
     parser.add_argument("--transformer_path", type=str, default=None)
     parser.add_argument("--output_path", type=str, default="./outputs/video")
+    parser.add_argument("--reference_video_path", type=str, default=None)
     parser.add_argument("--fps", type=int, default=16)
     parser.add_argument("--quantization", type=str, default=None)
     parser.add_argument("--cpu_offload", action="store_true")
