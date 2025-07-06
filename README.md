@@ -15,3 +15,8 @@ Download Checkpoints
 ```shell
 huggingface-cli download --resume-download cszy98/DCM --local-dir ./ckpt
 ```
+
+Inference
+```shell
+bash scripts/inference/inference_wan.sh
+```
