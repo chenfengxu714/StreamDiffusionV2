@@ -4,8 +4,6 @@ Installation
 ```shell
 conda create -n dcm python=3.10.0
 conda activate dcm
-git clone https://github.com/Vchitect/DCM
-cd DCM
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 pip install -e .
 pip install flash-attn --no-build-isolation
