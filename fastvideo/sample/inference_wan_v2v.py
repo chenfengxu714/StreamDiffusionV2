@@ -404,13 +404,14 @@ def inference(args):
     if args.t_start>-1:
         model_id = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
         vae = AutoencoderKLWan.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float32).to("cuda")
+        print(args.reference_video_path)
         latents=load_mp4_as_tensor(args.reference_video_path).unsqueeze(0)
         latents = latents.to("cuda")
         generator = torch.manual_seed(args.seed)
         with torch.no_grad():
             latents = vae.encode(latents,return_dict=False)[0].mean
-
-        scheduler.set_timesteps(num_inference_steps=args.num_inference_steps, device="cuda")
+        scheduler.set_timesteps(50, device="cuda")
+        print(scheduler.timesteps)
         noise = torch.randn_like(latents)
         timestep = scheduler.timesteps[args.t_start] 
         latents = scheduler.add_noise(latents, noise, torch.tensor([timestep]).to("cuda"))
@@ -486,7 +487,8 @@ def inference(args):
                     num_frames=args.num_frames,
                     guidance_scale=args.guidance_scale,
                     generator = generator,
-                    num_inference_steps=args.num_inference_steps,
+                    # num_inference_steps=args.num_inference_steps,
+                    cus_timesteps=[torch.tensor([1000]),torch.tensor([992]),torch.tensor([982]),torch.tensor([949]),torch.tensor([905]),torch.tensor([810])],
                     latents=latents,
                     t_start=args.t_start,
                     ).frames[0]

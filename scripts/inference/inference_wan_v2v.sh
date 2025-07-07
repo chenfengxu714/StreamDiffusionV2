@@ -8,14 +8,14 @@ torchrun --nnodes=1 --nproc_per_node=$num_gpus --master_port 12345 \
     --height 480 \
     --width 832 \
     --num_frames 17 \
-    --num_inference_steps 4 \
-    --t_start 0 \
+    --num_inference_steps 6 \
+    --t_start 1 \
     --guidance_scale 1 \
     --embedded_cfg_scale 1 \
     --flow_shift 3 \
     --flow-reverse \
-    --prompt_path prompt.txt \
+    --prompt_path prompt_v2v.txt \
     --seed 0 \
-    --reference_video_path outputs_video/inference_wan/res/cat_17.mp4  \
+    --reference_video_path output_17.mp4  \
     --output_path outputs_video/${script_name_no_ext}/res/ \
     --model_path ckpt/DCM_WAN/
