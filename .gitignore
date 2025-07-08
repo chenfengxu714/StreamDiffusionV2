@@ -212,4 +212,4 @@ __marimo__/
 # Project specific
 ckpt/
 outputs_video
-
+.DS_Store
