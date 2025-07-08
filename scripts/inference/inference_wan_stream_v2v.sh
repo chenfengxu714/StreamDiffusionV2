@@ -5,8 +5,8 @@ script_name_no_ext="${script_name%.sh}"
 num_gpus=1
 torchrun --nnodes=1 --nproc_per_node=$num_gpus --master_port 12345 \
     streamv2v/inference_wan_stream_v2v.py \
-    --height 320 \
-    --width 480 \
+    --height 480 \
+    --width 832 \
     --num_frames 17 \
     --num_inference_steps 4 \
     --t_start 1 \
