@@ -13,12 +13,12 @@
 # limitations under the License.
 
 from typing import Any, Dict, List, Optional, Union
-
 import torch
 
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from fastvideo.models.wan_hf.pipeline_wan import WanPipeline
 from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+from fastvideo.distill.solver import InferencePCMFMScheduler
 
 
 
@@ -64,13 +64,8 @@ class StreamV2V:
         self.pipe._cfg_scales = None
 
         # 4. Prepare timesteps
-        self.scheduler = self.pipe.scheduler
-        self.scheduler.set_timesteps(num_inference_steps, device=self.pipe._execution_device)
-
+        self.schedulers = []
         self.tde = self.pipe._execution_device
-        if cus_timesteps is not None:
-            self.scheduler.set_timesteps(num_inference_steps=len(cus_timesteps),sigmas=[x/1000 for x in cus_timesteps])
-            self.timesteps = self.scheduler.timesteps
         
         self.add_noise_scheduler = UniPCMultistepScheduler(prediction_type='flow_prediction', use_flow_sigmas=True, num_train_timesteps=1000, flow_shift=flow_shift)
         self.add_noise_scheduler.set_timesteps(50, device=self.tde)
@@ -78,6 +73,14 @@ class StreamV2V:
         self._set_prompt_embeds(prompt, negative_prompt)
 
         self.latents = None
+
+    def init_scheduler(self, num_inference_steps, cus_timesteps):
+        scheduler = InferencePCMFMScheduler(1000, 17, 50)
+        scheduler.set_timesteps(num_inference_steps, device=self.pipe._execution_device)
+        if cus_timesteps is not None:
+            scheduler.set_timesteps(num_inference_steps=len(cus_timesteps),sigmas=[x/1000 for x in cus_timesteps])
+            self.timesteps = scheduler.timesteps
+        return scheduler
 
     @property
     def do_classifier_free_guidance(self):
@@ -162,10 +165,20 @@ class StreamV2V:
                         noise_pred = noise_uncond + self.pipe._cfg_scales[i] * (noise_pred - noise_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
-            self.latents = self.scheduler.step(noise_pred, t, self.latents, return_dict=False)[0]
+            self.latents = torch.cat([
+                scheduler.step(
+                    noise_pred[i].unsqueeze(0),
+                    t[i].unsqueeze(0),
+                    self.latents[i].unsqueeze(0),
+                    return_dict=False
+                )[0]
+                for i, scheduler in enumerate(self.schedulers)
+            ], dim=0)
+
             if self.latents.shape[0] >= len(self.timesteps)-self.t_start-2-i:
                 latents = self.latents[-1]
                 self.latents = self.latents[:-1]
+                self.schedulers = self.schedulers[:-1]
 
                 output_video.append(self.video_decode(latents, return_dict=return_dict).frames[0])
             else:
@@ -190,6 +203,7 @@ class StreamV2V:
             self.latents = torch.cat([latents, self.latents], dim=0)
             assert self.latents.shape[0] <= self.num_inference_steps-self.t_start-1, \
                 f"latents.shape[0]: {self.latents.shape[0]}, num_inference_steps: {self.num_inference_steps}, t_start: {self.t_start}"
+        self.schedulers.insert(0, self.init_scheduler(self.num_inference_steps, self.cus_timesteps))
         
         # 6. Denoising loop
         t = self.timesteps[self.t_start+1:self.t_start+self.latents.shape[0]+1].to(self.tde)
@@ -218,14 +232,23 @@ class StreamV2V:
                 if self.pipe._cfg_scales is None:
                     noise_pred = noise_uncond + self.pipe.guidance_scale * (noise_pred - noise_uncond)
                 else:
-                    noise_pred = noise_uncond + self.pipe._cfg_scales[i] * (noise_pred - noise_uncond)
+                    noise_pred = noise_uncond + self.pipe._cfg_scales[0] * (noise_pred - noise_uncond)
 
-        # compute the previous noisy sample x_t -> x_t-1
-        self.latents = self.scheduler.step(noise_pred, t, self.latents, return_dict=False)[0]
+        # Compute the previous noisy sample x_t -> x_t-1 for each scheduler
+        self.latents = torch.cat([
+            scheduler.step(
+                noise_pred[i].unsqueeze(0),
+                t[i].unsqueeze(0),
+                self.latents[i].unsqueeze(0),
+                return_dict=False
+            )[0]
+            for i, scheduler in enumerate(self.schedulers)
+        ], dim=0)
 
-        if self.latents.shape[0] >= self.num_inference_steps-self.t_start-1:
+        if self.latents.shape[0] >= len(self.timesteps)-self.t_start-1:
             latents = self.latents[-1]
             self.latents = self.latents[:-1]
+            self.schedulers = self.schedulers[:-1]
             return self.video_decode(latents, return_dict=return_dict).frames[0]
 
         else:
