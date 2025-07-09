@@ -61,6 +61,16 @@ from fastvideo.distill.solver import InferencePCMFMScheduler
 from pipeline import StreamV2V
 
 import time
+import random
+
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def wan_forward_origin(
         self,
@@ -405,6 +415,12 @@ def inference(args):
     pipe.transformer.add_adapter(transformer_lora_config, adapter_name="lora1")
     transformer.add_layer()
 
+    pipe.scheduler = InferencePCMFMScheduler(
+            1000,
+            17,
+            50,
+        )
+
     from safetensors.torch import load_file as safetensors_load_file
     print('loading from....',args.model_path+'/transformer/diffusion_pytorch_model.safetensors')
     original_state_dict = safetensors_load_file(args.model_path+'/transformer/diffusion_pytorch_model.safetensors')
@@ -432,12 +448,6 @@ def inference(args):
     else:
         pipe.to(device)
 
-    pipe.scheduler = InferencePCMFMScheduler(
-        1000,
-        17,
-        50,
-    )
-
     if args.prompt_path is not None:
         prompt = [line.strip() for line in open(args.prompt_path, "r")][0]
     else:
@@ -454,6 +464,7 @@ def inference(args):
         guidance_scale=args.guidance_scale,
         generator=torch.Generator("cpu").manual_seed(args.seed),
         t_start=args.t_start,
+        flow_shift=args.flow_shift,
         cus_timesteps=[
             torch.tensor([1000]),
             torch.tensor([992]),
@@ -476,34 +487,17 @@ def inference(args):
         input_video = torch.cat([input_video, trailing_frames], dim=1)
 
     C, T, H, W = input_video.shape
-    input_video = input_video.reshape(T // args.num_frames, C, args.num_frames, H, W)
-
-    scheduler = UniPCMultistepScheduler(
-        prediction_type='flow_prediction',
-        use_flow_sigmas=True,
-        num_train_timesteps=1000,
-        flow_shift=flow_shift
-    )
-    scheduler.set_timesteps(50, device="cuda")
+    input_video = input_video.reshape(T // args.num_frames, 1, C, args.num_frames, H, W)
 
     start_time = time.time()
     output_video = []
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        for i in range(len(input_video)):
-            with torch.no_grad():
-                latents = pipe.vae.encode(input_video[[i]].to("cuda"), return_dict=False)[0].mean
-            latents = scheduler.add_noise(
-                latents,
-                torch.randn_like(latents),
-                torch.tensor([scheduler.timesteps[args.t_start]])
-            )
-            output = streamv2v(latents).frames[0]
-            output_video.append(output)
-        # Finish the incomplete denoising for the last few snippets
-        for i in range(args.num_inference_steps - 1):
-            output = streamv2v(torch.zeros_like(latents)).frames[0]
-            output_video.append(output)
-        output_video = output_video[args.num_inference_steps - 1:]
+        for i in range(input_video.shape[0]):
+            output=streamv2v(input_video[i])
+            if output is not None:
+                output_video.append(output)
+        output_final = streamv2v.final_output()
+        output_video.extend(output_final)
     output_video = np.concatenate(output_video, axis=0)
 
     end_time = time.time()
@@ -682,5 +676,6 @@ if __name__ == "__main__":
     parser.add_argument("--text-len-2", type=int, default=77)
 
     args = parser.parse_args()
+    seed_everything(args.seed)
     
     inference(args)
