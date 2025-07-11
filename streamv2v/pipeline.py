@@ -73,6 +73,8 @@ class StreamV2V:
         self._set_prompt_embeds(prompt, negative_prompt)
 
         self.latents = None
+        self.noise = None
+
 
     def init_scheduler(self, num_inference_steps, cus_timesteps):
         scheduler = InferencePCMFMScheduler(1000, 17, 50)
@@ -136,35 +138,11 @@ class StreamV2V:
     def final_output(self, return_dict=True):
         output_video = []
 
-        for i in range(len(self.timesteps)-self.t_start-2):
-            t = self.timesteps[self.t_start+i+2:self.t_start+i+self.latents.shape[0]+2].to(self.tde)
-            latent_model_input = self.latents.to(self.transformer_dtype)
+        for i in range(len(self.timesteps)-self.t_start-3):
+            t = self.timesteps[self.t_start+i+3:self.t_start+i+self.latents.shape[0]+3].to(self.tde)
+            noise_pred = self.one_step_denoise(self.latents, t)
 
-            noise_pred = self.pipe.transformer(
-                hidden_states=latent_model_input,
-                timestep=t,
-                encoder_hidden_states=self.prompt_embeds.repeat(self.latents.shape[0], 1, 1),
-                attention_kwargs=self.pipe._attention_kwargs,
-                return_dict=False,
-            )[0]
-
-            if self.do_classifier_free_guidance or self.pipe._cfg_scales is not None:
-                if (self.pipe._cfg_scales is not None and self.pipe._cfg_scales[i]==1) or self.pipe.guidance_scale==1:
-                    pass
-                else:
-                    noise_uncond = self.pipe.transformer(
-                        hidden_states=latent_model_input,
-                        timestep=t,
-                        encoder_hidden_states=self.negative_prompt_embeds,
-                        attention_kwargs=self.pipe._attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                    if self.pipe._cfg_scales is None:
-                        noise_pred = noise_uncond + self.pipe.guidance_scale * (noise_pred - noise_uncond)
-                    else:
-                        noise_pred = noise_uncond + self.pipe._cfg_scales[i] * (noise_pred - noise_uncond)
-
-            # compute the previous noisy sample x_t -> x_t-1
+            # batch denoising using the details denoiser
             self.latents = torch.cat([
                 scheduler.step(
                     noise_pred[i].unsqueeze(0),
@@ -175,7 +153,7 @@ class StreamV2V:
                 for i, scheduler in enumerate(self.schedulers)
             ], dim=0)
 
-            if self.latents.shape[0] >= len(self.timesteps)-self.t_start-2-i:
+            if self.latents.shape[0] >= len(self.timesteps)-self.t_start-3-i:
                 latents = self.latents[-1]
                 self.latents = self.latents[:-1]
                 self.schedulers = self.schedulers[:-1]
@@ -187,44 +165,23 @@ class StreamV2V:
         return output_video
     
     @torch.no_grad()
-    def __call__(
-        self,
-        input_video: torch.Tensor,
-        return_dict: bool = True,
-    ):
-        latents = self.pipe.vae.encode(input_video.to(self.pipe._execution_device), return_dict=False)[0].mean
-        noise = torch.randn_like(latents)
-        timestep = self.add_noise_scheduler.timesteps[self.t_start]
-        latents = self.add_noise_scheduler.add_noise(latents, noise, torch.tensor([timestep]).to(self.tde))
-
-        if self.latents is None:
-            self.latents = latents
-        else:
-            self.latents = torch.cat([latents, self.latents], dim=0)
-            assert self.latents.shape[0] <= self.num_inference_steps-self.t_start-1, \
-                f"latents.shape[0]: {self.latents.shape[0]}, num_inference_steps: {self.num_inference_steps}, t_start: {self.t_start}"
-        self.schedulers.insert(0, self.init_scheduler(self.num_inference_steps, self.cus_timesteps))
-        
-        # 6. Denoising loop
-        t = self.timesteps[self.t_start+1:self.t_start+self.latents.shape[0]+1].to(self.tde)
-        latent_model_input = self.latents.to(self.transformer_dtype)
-
+    def one_step_denoise(self, latents, timestep):
+        latent_model_input = latents.to(self.transformer_dtype)
         noise_pred = self.pipe.transformer(
             hidden_states=latent_model_input,
-            timestep=t,
-            encoder_hidden_states=self.prompt_embeds.repeat(self.latents.shape[0], 1, 1),
+            timestep=timestep,
+            encoder_hidden_states=self.prompt_embeds.repeat(latents.shape[0], 1, 1),
             attention_kwargs=self.pipe._attention_kwargs,
             return_dict=False,
         )[0]
 
-
         if self.do_classifier_free_guidance or self.pipe._cfg_scales is not None:
-            if (self.pipe._cfg_scales is not None and self.pipe._cfg_scales[0]==1) or self.pipe.guidance_scale==1:
+            if (self.pipe._cfg_scales is not None and self.pipe._cfg_scales[0]==1):
                 pass
             else:
                 noise_uncond = self.pipe.transformer(
                     hidden_states=latent_model_input,
-                    timestep=t,
+                    timestep=timestep,
                     encoder_hidden_states=self.negative_prompt_embeds,
                     attention_kwargs=self.pipe._attention_kwargs,
                     return_dict=False,
@@ -233,8 +190,39 @@ class StreamV2V:
                     noise_pred = noise_uncond + self.pipe.guidance_scale * (noise_pred - noise_uncond)
                 else:
                     noise_pred = noise_uncond + self.pipe._cfg_scales[0] * (noise_pred - noise_uncond)
+        return noise_pred
+    
+    @torch.no_grad()
+    def __call__(
+        self,
+        input_video: torch.Tensor,
+        return_dict: bool = True,
+    ):
+        # Encode the input video
+        latents = self.pipe.vae.encode(input_video.to(self.pipe._execution_device), return_dict=False)[0].mean
 
-        # Compute the previous noisy sample x_t -> x_t-1 for each scheduler
+        # Add noise to the latents
+        if self.noise is None:
+            self.noise = torch.randn_like(latents)
+        latents = self.add_noise_scheduler.add_noise(latents, self.noise, torch.tensor([992]).to(self.tde))
+        # Initialize a new scheduler for the newly input latents
+        self.schedulers.insert(0, self.init_scheduler(self.num_inference_steps, self.cus_timesteps))
+
+        # Denoise the newly input latents with the first step (without details denoiser)
+        timestep = self.timesteps[self.t_start+1].unsqueeze(0).to(self.tde)
+        new_noise_pred = self.one_step_denoise(latents, timestep)
+        latents = self.schedulers[0].step(new_noise_pred, timestep, latents, return_dict=False)[0]
+
+        if self.latents is None:
+            self.latents = latents
+        else:
+            self.latents = torch.cat([latents, self.latents], dim=0)
+            assert self.latents.shape[0] <= self.num_inference_steps-self.t_start-1, \
+                f"latents.shape[0]: {self.latents.shape[0]}, num_inference_steps: {self.num_inference_steps}, t_start: {self.t_start}"
+        
+        # batch denoising using the details denoiser
+        t = self.timesteps[self.t_start+2:self.t_start+self.latents.shape[0]+2].to(self.tde)
+        noise_pred = self.one_step_denoise(self.latents, t)
         self.latents = torch.cat([
             scheduler.step(
                 noise_pred[i].unsqueeze(0),
@@ -245,7 +233,8 @@ class StreamV2V:
             for i, scheduler in enumerate(self.schedulers)
         ], dim=0)
 
-        if self.latents.shape[0] >= len(self.timesteps)-self.t_start-1:
+        # Pop the last latent and scheduler if the latents are enough for denoising
+        if self.latents.shape[0] >= len(self.timesteps)-self.t_start-2:
             latents = self.latents[-1]
             self.latents = self.latents[:-1]
             self.schedulers = self.schedulers[:-1]

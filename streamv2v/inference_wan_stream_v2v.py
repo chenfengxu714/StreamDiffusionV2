@@ -387,6 +387,25 @@ def initialize_distributed():
                             rank=local_rank)
     initialize_sequence_parallel_state(world_size)
 
+def split_video_with_overlap(input_video, window_size=17, overlap=1):
+    """
+    input_video: Tensor of shape (C, T, H, W)
+    returns: Tensor of shape (B, C, window_size, H, W)
+    """
+    C, T, H, W = input_video.shape
+    stride = window_size - overlap
+    num_batches = (T - overlap) // stride
+
+    batches = []
+    for i in range(num_batches):
+        start = i * stride
+        end = start + window_size
+        if end > T:
+            break 
+        batch = input_video[:, start:end]  
+        batches.append(batch.unsqueeze(0))  
+
+    return torch.cat(batches, dim=0) 
 
 
 def inference(args):
@@ -398,7 +417,6 @@ def inference(args):
     with open(args.model_path+"transformer/config.json", "r") as f:
         wan_config_dict = json.load(f)
     transformer = WanTransformer3DModel(**wan_config_dict)
-    flow_shift = args.flow_shift # 5.0 for 720P, 3.0 for 480P
 
     pipe = WanPipeline.from_pretrained(
         args.model_path,
@@ -479,15 +497,11 @@ def inference(args):
         resize_hw=(args.height, args.width)
     )  # shape: (C, T, H, W)
 
-    # Pad so that T is a multiple of args.num_frames
-    if input_video.shape[1] % args.num_frames != 0:
-        pad_len = args.num_frames - (input_video.shape[1] % (args.num_frames))
-        last_frame = input_video[:, [-1], :, :]  # shape: (C, 1, H, W)
-        trailing_frames = last_frame.repeat(1, pad_len, 1, 1)
-        input_video = torch.cat([input_video, trailing_frames], dim=1)
+    input_video = split_video_with_overlap(input_video, window_size=args.num_frames, overlap=1).unsqueeze(1)
+    # input_video = input_video[0].unsqueeze(0)
+    T = args.num_frames * input_video.shape[0]
 
-    C, T, H, W = input_video.shape
-    input_video = input_video.reshape(T // args.num_frames, 1, C, args.num_frames, H, W)
+    # output_video = input_video[0][0].permute(1,2,3,0).cpu().numpy()
 
     start_time = time.time()
     output_video = []
