@@ -88,6 +88,9 @@ class StreamV2V:
     def do_classifier_free_guidance(self):
         return self.pipe._guidance_scale > 1.0 or self.pipe._cfg_scales is not None
 
+    def update_prompt(self, prompt: str, negative_prompt: Optional[str] = None):
+        self._set_prompt_embeds(prompt, negative_prompt)
+
     def _set_prompt_embeds(
         self,
         prompt: str,

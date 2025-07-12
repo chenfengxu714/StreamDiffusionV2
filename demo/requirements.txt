@@ -1,0 +1,9 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0.post1
+Pillow==10.1.0
+accelerate==0.24.0
+compel==2.0.2
+controlnet-aux==0.0.7
+peft==0.15.0
+xformers; sys_platform != 'darwin' or platform_machine != 'arm64'
+markdown2
