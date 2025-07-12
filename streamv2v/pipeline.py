@@ -168,7 +168,7 @@ class StreamV2V:
         return output_video
     
     @torch.no_grad()
-    def one_step_denoise(self, latents, timestep):
+    def one_step_denoise(self, latents, timestep, use_cfg=False):
         latent_model_input = latents.to(self.transformer_dtype)
         noise_pred = self.pipe.transformer(
             hidden_states=latent_model_input,
@@ -178,21 +178,15 @@ class StreamV2V:
             return_dict=False,
         )[0]
 
-        if self.do_classifier_free_guidance or self.pipe._cfg_scales is not None:
-            if (self.pipe._cfg_scales is not None and self.pipe._cfg_scales[0]==1):
-                pass
-            else:
-                noise_uncond = self.pipe.transformer(
-                    hidden_states=latent_model_input,
-                    timestep=timestep,
-                    encoder_hidden_states=self.negative_prompt_embeds,
-                    attention_kwargs=self.pipe._attention_kwargs,
-                    return_dict=False,
-                )[0]
-                if self.pipe._cfg_scales is None:
-                    noise_pred = noise_uncond + self.pipe.guidance_scale * (noise_pred - noise_uncond)
-                else:
-                    noise_pred = noise_uncond + self.pipe._cfg_scales[0] * (noise_pred - noise_uncond)
+        if use_cfg:
+            noise_uncond = self.pipe.transformer(
+                hidden_states=latent_model_input,
+                timestep=timestep,
+                encoder_hidden_states=self.negative_prompt_embeds,
+                attention_kwargs=self.pipe._attention_kwargs,
+                return_dict=False,
+            )[0]
+            noise_pred = noise_uncond + self.pipe.guidance_scale * (noise_pred - noise_uncond)
         return noise_pred
     
     @torch.no_grad()
@@ -213,7 +207,7 @@ class StreamV2V:
 
         # Denoise the newly input latents with the first step (without details denoiser)
         timestep = self.timesteps[self.t_start+1].unsqueeze(0).to(self.tde)
-        new_noise_pred = self.one_step_denoise(latents, timestep)
+        new_noise_pred = self.one_step_denoise(latents, timestep, use_cfg=True)
         latents = self.schedulers[0].step(new_noise_pred, timestep, latents, return_dict=False)[0]
 
         if self.latents is None:

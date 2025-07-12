@@ -10,7 +10,7 @@ torchrun --nnodes=1 --nproc_per_node=$num_gpus --master_port 12345 \
     --num_frames 17 \
     --num_inference_steps 4 \
     --t_start 1 \
-    --guidance_scale 1 \
+    --guidance_scale 2 \
     --embedded_cfg_scale 1 \
     --flow_shift 3 \
     --flow-reverse \
