@@ -137,8 +137,17 @@ class CausalWanSelfAttention(nn.Module):
             roped_key = causal_rope_apply(
                 k, grid_sizes, freqs, start_frame=current_start // math.prod(grid_sizes[0][1:]).item()).type_as(v)
 
-            kv_cache["k"][:, current_start:current_end] = roped_key
-            kv_cache["v"][:, current_start:current_end] = v
+            if kv_cache["end_point"] < current_end:
+                kv_cache["k"][:, current_start:kv_cache["end_point"]] = \
+                    (kv_cache["k"][:, current_start:kv_cache["end_point"]]+roped_key[:, :kv_cache["end_point"] - current_start])/2
+                kv_cache["v"][:, current_start:kv_cache["end_point"]] = \
+                    (kv_cache["v"][:, current_start:kv_cache["end_point"]] + v[:, :kv_cache["end_point"] - current_start])/2
+
+                kv_cache["k"][:, kv_cache["end_point"]:current_end] = roped_key[:, kv_cache["end_point"]-current_start:]
+                kv_cache["v"][:, kv_cache["end_point"]:current_end] = v[:, kv_cache["end_point"]-current_start:]
+            else:
+                kv_cache["k"][:, current_start:current_end] = roped_key
+                kv_cache["v"][:, current_start:current_end] = v
 
             x = attention(roped_query, kv_cache["k"][:, :current_end], kv_cache["v"][:, :current_end])
 

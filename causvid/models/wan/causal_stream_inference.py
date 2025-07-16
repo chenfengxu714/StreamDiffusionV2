@@ -32,7 +32,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
         self.num_transformer_blocks = 30
-        self.frame_seq_length = 1560
+        scale_size = 16
+        self.frame_seq_length = (args.height//scale_size) * (args.width//scale_size)
         self.conditional_dict = None
 
         self.kv_cache1 = None
@@ -54,8 +55,9 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         for _ in range(self.num_transformer_blocks):
             kv_cache1.append({
-                "k": torch.zeros([batch_size, 100000, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, 100000, 12, 128], dtype=dtype, device=device)
+                "k": torch.zeros([batch_size, self.frame_seq_length*30, 12, 128], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, self.frame_seq_length*30, 12, 128], dtype=dtype, device=device),
+                "end_point": self.frame_seq_length*self.num_frame_per_block
             })
 
         self.kv_cache1 = kv_cache1  # always store the clean cache
@@ -141,15 +143,18 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                     current_end=current_end
                 )
 
-        # self.generator(
-        #     noisy_image_or_video=denoised_pred,
-        #     conditional_dict=self.conditional_dict,
-        #     timestep=timestep * 0,
-        #     kv_cache=self.kv_cache1,
-        #     crossattn_cache=self.crossattn_cache,
-        #     current_start=current_start,
-        #     current_end=current_end
-        # )
+        self.generator(
+            noisy_image_or_video=denoised_pred,
+            conditional_dict=self.conditional_dict,
+            timestep=timestep * 0,
+            kv_cache=self.kv_cache1,
+            crossattn_cache=self.crossattn_cache,
+            current_start=current_start,
+            current_end=current_end
+        )
+
+        for i in range(self.num_transformer_blocks):
+            self.kv_cache1[i]["end_point"] = current_end
 
         # Step 3: Decode the output
         video = self.vae.decode_to_pixel(denoised_pred)

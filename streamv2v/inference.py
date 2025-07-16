@@ -62,12 +62,19 @@ parser.add_argument("--checkpoint_folder", type=str)
 parser.add_argument("--output_folder", type=str)
 parser.add_argument("--prompt_file_path", type=str)
 parser.add_argument("--video_path", type=str)
+parser.add_argument("--noise_scale", type=float, default=0.8)
+parser.add_argument("--height", type=int, default=480)
+parser.add_argument("--width", type=int, default=480)
+parser.add_argument("--fps", type=int, default=16)
 
 args = parser.parse_args()
 
 torch.set_grad_enabled(False)
 
 config = OmegaConf.load(args.config_path)
+# Add all command-line args into the config for downstream use
+for k, v in vars(args).items():
+    config[k] = v
 
 pipeline = CausalStreamInferencePipeline(config, device="cuda")
 pipeline.to(device="cuda", dtype=torch.bfloat16)
@@ -79,11 +86,11 @@ pipeline.generator.load_state_dict(
     state_dict, strict=True
 )
 
-input_video_original = load_mp4_as_tensor(args.video_path).unsqueeze(0) # [1, C, T, H, W]
+input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0) # [1, C, T, H, W]
 input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device="cuda")
 
 chunck_size=(pipeline.num_frame_per_block-1)*4+1
-overlap = 3
+overlap = 0
 num_chuncks = (input_video_original.shape[2]-overlap) // (chunck_size-overlap)
 
 dataset = TextDataset(args.prompt_file_path)
@@ -92,6 +99,7 @@ prompts = [dataset[0]]
 
 video_list = []
 cost_time = 0
+noise_scale = args.noise_scale
 
 for i in range(num_chuncks):
     torch.cuda.synchronize()
@@ -113,8 +121,6 @@ for i in range(num_chuncks):
         pipeline.prepare(noise=latents, text_prompts=prompts)
         noise = torch.randn_like(latents)
 
-    noise_scale = 0.8
-
     latents = noise*noise_scale + latents*(1-noise_scale)
 
     video = pipeline.inference(
@@ -129,6 +135,7 @@ for i in range(num_chuncks):
     if i==0:
         video_list.append(video)
     else:
+        # video_list.append(video)
         video_list.append(video[overlap:])
 
 video = np.concatenate(video_list, axis=0)
@@ -139,4 +146,4 @@ print(f"Time taken: {cost_time} seconds")
 print(f"FPS: {T/cost_time}")
 
 export_to_video(
-    video, os.path.join(args.output_folder, f"output_{0:03d}.mp4"), fps=16)
+    video, os.path.join(args.output_folder, f"output_{0:03d}.mp4"), fps=args.fps)
