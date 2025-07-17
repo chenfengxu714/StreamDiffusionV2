@@ -34,6 +34,7 @@ class ConnectionManager:
         self.active_connections[user_id] = {
             "websocket": websocket,
             "queue": asyncio.Queue(),
+            "output_queue": asyncio.Queue(maxsize=10)
         }
         await websocket.send_json(
             {"status": "connected", "message": "Connected"},
@@ -114,3 +115,21 @@ class ConnectionManager:
                 return await websocket.receive_bytes()
         except Exception as e:
             logging.error(f"Error: Receive bytes: {e}")
+
+    async def put_frame(self, user_id: UUID, frame: bytes):
+        session = self.active_connections.get(user_id)
+        if session:
+            queue = session["output_queue"]
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            await queue.put(frame)
+
+    async def get_frame(self, user_id: UUID) -> bytes:
+        session = self.active_connections.get(user_id)
+        if session:
+            queue = session["output_queue"]
+            return await queue.get()
+        return None

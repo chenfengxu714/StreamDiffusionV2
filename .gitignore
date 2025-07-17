@@ -211,5 +211,8 @@ __marimo__/
 
 # Project specific
 ckpt/
-outputs_video
+ckpts/
+outputs_video/
+outputs/
+wan_models/
 .DS_Store

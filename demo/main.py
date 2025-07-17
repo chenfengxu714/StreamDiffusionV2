@@ -110,31 +110,33 @@ class App:
         @self.app.get("/api/stream/{user_id}")
         async def stream(user_id: uuid.UUID, request: Request):
             try:
-
-                async def generate():
+                async def fill_frame_buffer():
                     last_params = SimpleNamespace()
                     while True:
-                        last_time = time.time()
                         params = await self.conn_manager.get_latest_data(user_id)
                         if not vars(params) or params.__dict__ == last_params.__dict__:
                             await self.conn_manager.send_json(
                                 user_id, {"status": "send_frame"}
                             )
                             continue
-
                         last_params = params
                         images = self.pipeline.predict(params)
                         for image in images:
                             frame = pil_to_frame(image)
-                            yield frame
-                            # https://bugs.chromium.org/p/chromium/issues/detail?id=1250396
-                            if not is_firefox(request.headers["user-agent"]):
-                                yield frame
+                            await self.conn_manager.put_frame(user_id, frame)
                         await self.conn_manager.send_json(
                             user_id, {"status": "send_frame"}
                         )
-                        if self.args.debug:
-                            print(f"Time taken: {time.time() - last_time}")
+
+                asyncio.create_task(fill_frame_buffer())  # Run in background
+                await self.conn_manager.send_json(user_id, {"status": "send_frame"})
+
+                async def generate():
+                    while True:
+                        frame = await self.conn_manager.get_frame(user_id)
+                        yield frame
+                        if not is_firefox(request.headers["user-agent"]):
+                            yield frame
 
                 return StreamingResponse(
                     generate(),
@@ -171,14 +173,13 @@ class App:
         )
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch_dtype = torch.float16
+device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 
 _pipeline = None
 def get_pipeline():
     global _pipeline
     if _pipeline is None:
-        _pipeline = Pipeline(config, device, torch_dtype)
+        _pipeline = Pipeline(config, device)
     return _pipeline
 
 app = App(config, get_pipeline()).app
@@ -190,7 +191,7 @@ if __name__ == "__main__":
         app,
         host=config.host,
         port=config.port,
-        reload=config.reload,
+        reload=False,
         ssl_certfile=config.ssl_certfile,
         ssl_keyfile=config.ssl_keyfile,
     )

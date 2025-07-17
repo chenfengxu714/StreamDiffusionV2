@@ -1,7 +1,10 @@
+from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
+
 import sys
 import os
-import json
 import numpy as np
+import time
+from omegaconf import OmegaConf
 
 sys.path.append(
     os.path.join(
@@ -18,16 +21,8 @@ from pydantic import BaseModel, Field
 from PIL import Image
 from typing import List
 
-from streamv2v.pipeline import StreamV2V
-from streamv2v.init_utils import (
-    initialize_distributed,
-    init_wan_pipe,
-)
 
-# base_model = "runwayml/stable-diffusion-v1-5"
-base_model = "Jiali/stable-diffusion-1.5"
-
-default_prompt = "A man is talking"
+default_prompt = "A woman is talking"
 
 page_content = """<h1 class="text-3xl font-bold">StreamV2V</h1>
 <p class="text-sm">
@@ -73,69 +68,97 @@ class Pipeline:
             field="textarea",
             id="prompt",
         )
-        # negative_prompt: str = Field(
-        #     default_negative_prompt,
-        #     title="Negative Prompt",
-        #     field="textarea",
-        #     id="negative_prompt",
-        # )
         width: int = Field(
-            240, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
+            400, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
         )
         height: int = Field(
             400, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
         )
 
-    def __init__(self, args: Args, device: torch.device, torch_dtype: torch.dtype):
-        initialize_distributed()
-        wan_pipe = init_wan_pipe(args)
-        params = self.InputParams()
-        self.last_prompt = params.prompt
+    def __init__(self, args: Args, device: torch.device):
+        torch.set_grad_enabled(False)
 
-        self.streamv2v = StreamV2V(wan_pipe)
-        self.streamv2v.prepare(
-            prompt=self.last_prompt,
-            negative_prompt=args.neg_prompt,
-            height=params.height,
-            width=params.width,
-            num_frames=args.num_frames,
-            num_inference_steps=args.num_inference_steps,
-            guidance_scale=args.guidance_scale,
-            generator=torch.Generator("cpu").manual_seed(args.seed),
-            t_start=args.t_start,
-            flow_shift=args.flow_shift,
-            cus_timesteps=[
-                torch.tensor([1000]),
-                torch.tensor([992]),
-                torch.tensor([982]),
-                torch.tensor([949]),
-                torch.tensor([905]),
-                torch.tensor([810])
-            ],
+        params = self.InputParams()
+        config = OmegaConf.load(args.config_path)
+        for k, v in args._asdict().items():
+            config[k] = v
+        config["height"] = params.height
+        config["width"] = params.width
+
+        self.device = device
+        self.pipeline = CausalStreamInferencePipeline(config, device=device)
+        self.pipeline.to(device=device, dtype=torch.bfloat16)
+
+        state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")[
+            'generator']
+
+        self.pipeline.generator.load_state_dict(
+            state_dict, strict=True
         )
 
+        self.chunk_size = (self.pipeline.num_frame_per_block - 1) * 4 + 1
+        self.chunk_size = 9
+        self.width = params.width
+        self.height = params.height
+        self.fps = args.fps
+
+        self.prompt = params.prompt
+        self.noise = torch.randn(1, 3, 16, self.height // 8, self.width // 8).to(
+            device=self.device, dtype=torch.bfloat16
+        )
+        self.noise_scale = args.noise_scale
+        self.pipeline.prepare(noise=self.noise, text_prompts=[self.prompt])
         self.images = []
-        self.num_frames = args.num_frames
-        self.overlap = args.overlap
+        self.current_start = 0
+        self.current_end = self.chunk_size
 
     def predict(self, params: "Pipeline.InputParams") -> List[Image.Image]:
-        if params.prompt != self.last_prompt:
-            self.last_prompt = params.prompt
-            self.streamv2v.update_prompt(params.prompt)
+        if params.prompt != self.prompt:
+            self.prompt = params.prompt
+            self.pipeline.prepare(noise=self.noise, text_prompts=[self.prompt])
 
-        image_tensor = self.image_to_tensor(params.image, params.width, params.height)
+        image_tensor = self.image_to_tensor(params.image, self.width, self.height)
         self.images.append(image_tensor)
 
-        if len(self.images) >= self.num_frames:
-            images = torch.stack(self.images[:self.num_frames], dim=0).unsqueeze(0)
-            # [B, T, H, W, C] -> [B, C, T, H, W]
-            images = images.permute(0, 4, 1, 2, 3)
-            output = self.streamv2v(images)
-            self.images = self.images[self.num_frames - self.overlap:]
-            if output is not None:
-                output_images = [self.array_to_image(image) for image in output]
-                return output_images
+        if len(self.images) >= self.chunk_size:
+            time_start = time.time()
+            images = torch.stack(self.images[:self.chunk_size], dim=0).unsqueeze(0)
+            images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=self.device)
+            latents = self.pipeline.vae.model.encode(images, [0,1])
+            latents = latents.transpose(2,1)
+            latents = self.noise * self.noise_scale + latents * (1 - self.noise_scale)
 
+            # Calculate sequence positions, but keep them within KV cache bounds
+            max_seq_length = self.pipeline.frame_seq_length * 30  # KV cache size
+            current_start = ((self.current_start // 3) * self.pipeline.frame_seq_length) % max_seq_length
+            current_end = ((self.current_end // 3) * self.pipeline.frame_seq_length) % max_seq_length
+
+            # # Ensure current_end is never 0 and is always greater than current_start
+            if current_end < current_start:
+                self.current_start += self.chunk_size
+                self.current_end += self.chunk_size
+                current_start = ((self.current_start // 3) * self.pipeline.frame_seq_length) % max_seq_length
+                current_end = ((self.current_end // 3) * self.pipeline.frame_seq_length) % max_seq_length
+
+            video = self.pipeline.inference(
+                noise=latents,
+                current_start=current_start,
+                current_end=current_end,
+            )[0].permute(0, 2, 3, 1).cpu().numpy()
+            self.images = []
+            self.current_start += self.chunk_size
+            self.current_end += self.chunk_size
+            time_end = time.time()
+            print(f"FPS model: {len(video) / (time_end - time_start)}")
+            return [self.array_to_image(image) for image in video]
+            # For testing io sync without model
+            # outputs = [
+            #     Image.fromarray(((image.cpu().numpy() + 1) * 127.5).astype(np.uint8))
+            #     for image in self.images
+            # ]
+            # time.sleep(0.9)
+            # self.images = []
+            # return outputs
         return []
 
     def image_to_tensor(
@@ -152,7 +175,7 @@ class Pipeline:
 
     def array_to_image(self, image_array: np.ndarray, normalize: bool = True) -> Image.Image:
         if normalize:
-            image_array = (image_array + 1.0) * 127.5
+            image_array = image_array * 255.0
         image_array = image_array.astype(np.uint8)
         image = Image.fromarray(image_array)
         return image
