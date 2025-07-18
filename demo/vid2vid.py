@@ -69,10 +69,10 @@ class Pipeline:
             id="prompt",
         )
         width: int = Field(
-            400, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
+            192, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
         )
         height: int = Field(
-            400, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
+            192, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
         )
 
     def __init__(self, args: Args, device: torch.device):
@@ -100,7 +100,7 @@ class Pipeline:
         self.chunk_size = 9
         self.width = params.width
         self.height = params.height
-        self.fps = args.fps
+        self.overlap = args.overlap
 
         self.prompt = params.prompt
         self.noise = torch.randn(1, 3, 16, self.height // 8, self.width // 8).to(
@@ -109,20 +109,32 @@ class Pipeline:
         self.noise_scale = args.noise_scale
         self.pipeline.prepare(noise=self.noise, text_prompts=[self.prompt])
         self.images = []
+        self.prevs = []
         self.current_start = 0
         self.current_end = self.chunk_size
 
-    def predict(self, params: "Pipeline.InputParams") -> List[Image.Image]:
-        if params.prompt != self.prompt:
-            self.prompt = params.prompt
-            self.pipeline.prepare(noise=self.noise, text_prompts=[self.prompt])
+    def accept_image(self, params: "Pipeline.InputParams"):
+        image_array = self.image_to_array(params.image, self.width, self.height)
+        self.images.append(image_array)
 
-        image_tensor = self.image_to_tensor(params.image, self.width, self.height)
-        self.images.append(image_tensor)
-
-        if len(self.images) >= self.chunk_size:
+    def predict(self) -> List[Image.Image]:
+        if len(self.images) + len(self.prevs) >= self.chunk_size:
+            torch.set_grad_enabled(False)
             time_start = time.time()
-            images = torch.stack(self.images[:self.chunk_size], dim=0).unsqueeze(0)
+
+            num_images = self.chunk_size - len(self.prevs)
+            step = len(self.images) / (num_images - 1)
+            indices = [int(i * step) for i in range(num_images - 1)] + [-1]
+            images = np.stack([self.images[i] for i in indices], axis=0)
+            self.images = []
+            if len(self.prevs) > 0:
+                total_images = np.concatenate([self.prevs, images], axis=0)
+            else:
+                total_images = images
+            if self.overlap > 0:
+                self.prevs = total_images[-self.overlap:]
+
+            images = torch.from_numpy(images).unsqueeze(0)
             images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=self.device)
             latents = self.pipeline.vae.model.encode(images, [0,1])
             latents = latents.transpose(2,1)
@@ -133,45 +145,44 @@ class Pipeline:
             current_start = ((self.current_start // 3) * self.pipeline.frame_seq_length) % max_seq_length
             current_end = ((self.current_end // 3) * self.pipeline.frame_seq_length) % max_seq_length
 
-            # # Ensure current_end is never 0 and is always greater than current_start
+            # Ensure current_end is never 0 and is always greater than current_start
             if current_end < current_start:
                 self.current_start += self.chunk_size
                 self.current_end += self.chunk_size
                 current_start = ((self.current_start // 3) * self.pipeline.frame_seq_length) % max_seq_length
                 current_end = ((self.current_end // 3) * self.pipeline.frame_seq_length) % max_seq_length
 
-            video = self.pipeline.inference(
-                noise=latents,
-                current_start=current_start,
-                current_end=current_end,
-            )[0].permute(0, 2, 3, 1).cpu().numpy()
-            self.images = []
+            with torch.inference_mode():
+                video = self.pipeline.inference(
+                    noise=latents,
+                    current_start=current_start,
+                    current_end=current_end,
+                )[0].permute(0, 2, 3, 1).cpu().numpy()
             self.current_start += self.chunk_size
             self.current_end += self.chunk_size
             time_end = time.time()
             print(f"FPS model: {len(video) / (time_end - time_start)}")
-            return [self.array_to_image(image) for image in video]
+            return [self.array_to_image(image) for image in video[self.overlap:]]
             # For testing io sync without model
             # outputs = [
-            #     Image.fromarray(((image.cpu().numpy() + 1) * 127.5).astype(np.uint8))
-            #     for image in self.images
+            #     Image.fromarray(((image + 1) * 127.5).astype(np.uint8))
+            #     for image in images
             # ]
-            # time.sleep(0.9)
-            # self.images = []
+            # time.sleep(1)
             # return outputs
         return []
 
-    def image_to_tensor(
+    def image_to_array(
         self, image: Image.Image,
         width: int,
         height: int,
         normalize: bool = True
-    ) -> torch.Tensor:
+    ) -> np.ndarray:
         image = image.convert("RGB").resize((width, height))
-        image_tensor = torch.from_numpy(np.array(image))
+        image_array = np.array(image)
         if normalize:
-            image_tensor = image_tensor / 127.5 - 1.0
-        return image_tensor
+            image_array = image_array / 127.5 - 1.0
+        return image_array
 
     def array_to_image(self, image_array: np.ndarray, normalize: bool = True) -> Image.Image:
         if normalize:

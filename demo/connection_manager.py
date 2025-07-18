@@ -34,7 +34,7 @@ class ConnectionManager:
         self.active_connections[user_id] = {
             "websocket": websocket,
             "queue": asyncio.Queue(),
-            "output_queue": asyncio.Queue(maxsize=10)
+            "output_queue": asyncio.Queue()
         }
         await websocket.send_json(
             {"status": "connected", "message": "Connected"},
@@ -133,3 +133,10 @@ class ConnectionManager:
             queue = session["output_queue"]
             return await queue.get()
         return None
+
+    async def get_output_queue_size(self, user_id: UUID) -> int:
+        session = self.active_connections.get(user_id)
+        if session:
+            queue = session["output_queue"]
+            return queue.qsize()
+        return 0

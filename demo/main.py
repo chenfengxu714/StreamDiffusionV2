@@ -62,6 +62,7 @@ class App:
             if not self.conn_manager.check_user(user_id):
                 return HTTPException(status_code=404, detail="User not found")
             last_time = time.time()
+            # index = 0
             try:
                 while True:
                     if (
@@ -96,6 +97,9 @@ class App:
                             continue
                         params.image = bytes_to_pil(image_data)
                     await self.conn_manager.update_data(user_id, params)
+                    # print(f"frame {index} client timestamp: {data['timestamp']}")
+                    # print(f"frame {index} server received, time: {time.time()}")
+                    # index += 1
                     await self.conn_manager.send_json(user_id, {"status": "wait"})
 
             except Exception as e:
@@ -110,33 +114,70 @@ class App:
         @self.app.get("/api/stream/{user_id}")
         async def stream(user_id: uuid.UUID, request: Request):
             try:
-                async def fill_frame_buffer():
+                async def push_frames_to_pipeline():
+                    # index = 0
                     last_params = SimpleNamespace()
                     while True:
                         params = await self.conn_manager.get_latest_data(user_id)
-                        if not vars(params) or params.__dict__ == last_params.__dict__:
-                            await self.conn_manager.send_json(
-                                user_id, {"status": "send_frame"}
-                            )
-                            continue
-                        last_params = params
-                        images = self.pipeline.predict(params)
-                        for image in images:
-                            frame = pil_to_frame(image)
-                            await self.conn_manager.put_frame(user_id, frame)
+                        if vars(params) and params.__dict__ != last_params.__dict__:
+                            last_params = params
+                            # print(f"frame {index} push start, time: {time.time()}")
+                            self.pipeline.accept_image(params)
+                            # print(f"frame {index} pushed, time: {time.time()}")
+                            # index += 1
                         await self.conn_manager.send_json(
                             user_id, {"status": "send_frame"}
                         )
 
-                asyncio.create_task(fill_frame_buffer())  # Run in background
-                await self.conn_manager.send_json(user_id, {"status": "send_frame"})
+                def produce_predictions(user_id, loop):
+                    # index = 0
+                    while True:
+                        # start_time = time.time()
+                        images = self.pipeline.predict()
+                        if len(images) == 0:
+                            time.sleep(THROTTLE)
+                            continue
+                        # print(f"model {index} start, time: {start_time}")
+                        # print(f"model outputs {index}, time: {time.time()}")
+                        # index += 9
+                        for image in images:
+                            frame = pil_to_frame(image)
+                            asyncio.run_coroutine_threadsafe(
+                                self.conn_manager.put_frame(user_id, frame), loop
+                            )
 
                 async def generate():
+                    last_burst_time = time.time()
+                    last_queue_size = 0
+                    sleep_time = 1 / 30
+                    # index = 0
                     while True:
-                        frame = await self.conn_manager.get_frame(user_id)
-                        yield frame
-                        if not is_firefox(request.headers["user-agent"]):
+                        queue_size = await self.conn_manager.get_output_queue_size(user_id)
+                        # print(f"Queue size: {queue_size}")
+                        if queue_size > last_queue_size:
+                            current_burst_time = time.time()
+                            estimated_gap = current_burst_time - last_burst_time
+                            sleep_time = estimated_gap / queue_size
+                            last_burst_time = current_burst_time
+                        last_queue_size = queue_size
+                        try:
+                            frame = await self.conn_manager.get_frame(user_id)
                             yield frame
+                            if not is_firefox(request.headers["user-agent"]):
+                                yield frame
+                            # print(f"frame {index} sent, time: {time.time()}")
+                            # index += 1
+                        except Exception as e:
+                            print(f"Frame fetch error: {e}")
+                            break
+
+                        await asyncio.sleep(sleep_time)
+
+                asyncio.create_task(push_frames_to_pipeline())
+                asyncio.create_task(asyncio.to_thread(
+                    produce_predictions, user_id, asyncio.get_running_loop()
+                ))
+                await self.conn_manager.send_json(user_id, {"status": "send_frame"})
 
                 return StreamingResponse(
                     generate(),
@@ -173,7 +214,7 @@ class App:
         )
 
 
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 _pipeline = None
 def get_pipeline():

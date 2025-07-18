@@ -46,7 +46,10 @@ export const lcmLiveActions = {
                         case "send_frame":
                             lcmLiveStatus.set(LCMLiveStatus.SEND_FRAME);
                             const streamData = getSreamdata();
-                            websocket?.send(JSON.stringify({ status: "next_frame" }));
+                            websocket?.send(JSON.stringify({ 
+                                status: "next_frame", 
+                                timestamp: Date.now()
+                            }));
                             for (const d of streamData) {
                                 this.send(d);
                             }
