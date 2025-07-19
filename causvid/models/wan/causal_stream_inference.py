@@ -6,7 +6,6 @@ from causvid.models import (
 from typing import List, Optional
 import torch
 
-
 class CausalStreamInferencePipeline(torch.nn.Module):
     def __init__(self, args, device):
         super().__init__()
@@ -34,6 +33,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.num_transformer_blocks = 30
         scale_size = 16
         self.frame_seq_length = (args.height//scale_size) * (args.width//scale_size)
+        if args.unfold:
+            self.frame_seq_length = self.frame_seq_length // 4
         self.conditional_dict = None
 
         self.kv_cache1 = None
@@ -82,6 +83,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.conditional_dict = self.text_encoder(
             text_prompts=text_prompts
         )
+        if batch_size > 1:
+            self.conditional_dict['prompt_embeds'] = self.conditional_dict['prompt_embeds'].repeat(batch_size, 1, 1)
 
         # Step 1: Initialize KV cache
         if self.kv_cache1 is None:
@@ -105,17 +108,15 @@ class CausalStreamInferencePipeline(torch.nn.Module):
     def inference(self, noise: torch.Tensor, current_start: int, current_end: int) -> torch.Tensor:
         batch_size = noise.shape[0]
 
-        # Step 2: Temporal denoising loop
-        noisy_input = noise
         # Step 2.1: Spatial denoising loop
         for index, current_timestep in enumerate(self.denoising_step_list):
             # set current timestep
             timestep = torch.ones(
-                [batch_size, self.num_frame_per_block], device=noise.device, dtype=torch.int64) * current_timestep
+                [batch_size, noise.shape[1]], device=noise.device, dtype=torch.int64) * current_timestep
 
             if index < len(self.denoising_step_list) - 1:
                 denoised_pred = self.generator(
-                    noisy_image_or_video=noisy_input,
+                    noisy_image_or_video=noise,
                     conditional_dict=self.conditional_dict,
                     timestep=timestep,
                     kv_cache=self.kv_cache1,
@@ -124,7 +125,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                     current_end=current_end
                 )
                 next_timestep = self.denoising_step_list[index + 1]
-                noisy_input = self.scheduler.add_noise(
+                noise = self.scheduler.add_noise(
                     denoised_pred.flatten(0, 1),
                     torch.randn_like(denoised_pred.flatten(0, 1)),
                     next_timestep *
@@ -134,7 +135,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             else:
                 # for getting real output
                 denoised_pred = self.generator(
-                    noisy_image_or_video=noisy_input,
+                    noisy_image_or_video=noise,
                     conditional_dict=self.conditional_dict,
                     timestep=timestep,
                     kv_cache=self.kv_cache1,
@@ -153,11 +154,12 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             current_end=current_end
         )
 
-        for i in range(self.num_transformer_blocks):
-            self.kv_cache1[i]["end_point"] = current_end
+        # for i in range(self.num_transformer_blocks):
+        #     self.kv_cache1[i]["end_point"] = current_end
 
         # Step 3: Decode the output
-        video = self.vae.decode_to_pixel(denoised_pred)
+        video = self.vae.stream_decode_to_pixel(denoised_pred)
+        # video = self.vae.model.decode(denoised_pred.transpose(1,2), [0,1]).transpose(1,2).float()
         video = (video * 0.5 + 0.5).clamp(0, 1)
 
         return video

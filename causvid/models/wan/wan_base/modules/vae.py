@@ -506,6 +506,7 @@ class WanVAE_(nn.Module):
         self.conv2 = CausalConv3d(z_dim, z_dim, 1)
         self.decoder = Decoder3d(dim, z_dim, dim_mult, num_res_blocks,
                                  attn_scales, self.temperal_upsample, dropout)
+        self.fist_batch = True
 
     def forward(self, x):
         mu, log_var = self.encode(x)
@@ -541,6 +542,38 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return mu
 
+    def stream_encode(self, x):
+        # cache
+        t = x.shape[2]
+        if self.fist_batch:
+            self.clear_cache_encode()
+            self._enc_conv_idx = [0]
+            out = self.encoder(
+                x[:, :, :1, :, :],
+                feat_cache=self._enc_feat_map,
+                feat_idx=self._enc_conv_idx,
+                )
+            self._enc_conv_idx = [0]
+            out_ = self.encoder(
+                x[:, :, 1:, :, :],
+                feat_cache=self._enc_feat_map,
+                feat_idx=self._enc_conv_idx,
+                )
+            out = torch.cat([out, out_], 2)
+        else:
+            out=[]
+            for i in range(t//4):
+                self._enc_conv_idx = [0]
+                out.append(self.encoder(
+                    x[:, :, i*4:(i+1)*4, :, :],
+                    feat_cache=self._enc_feat_map,
+                    feat_idx=self._enc_conv_idx,
+                    ))
+            out = torch.cat(out, 2)
+        mu, log_var = self.conv1(out).chunk(2, dim=1)
+        # self.clear_cache()
+        return mu
+
     def decode(self, z, scale):
         self.clear_cache()
         # z: [b,c,t,h,w]
@@ -567,6 +600,44 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return out
 
+    def stream_decode(self, z, scale):
+        # z: [b,c,t,h,w]
+        t=z.shape[2]
+        if isinstance(scale[0], torch.Tensor):
+            z = z / scale[1].view(1, self.z_dim, 1, 1, 1) + scale[0].view(
+                1, self.z_dim, 1, 1, 1)
+        else:
+            z = z / scale[1] + scale[0]
+        x = self.conv2(z)
+        if self.fist_batch:
+            self.clear_cache_decode()
+            self.fist_batch = False
+            self._conv_idx = [0]
+            out = self.decoder(
+                x[:, :, :1, :, :],
+                feat_cache=self._feat_map,
+                feat_idx=self._conv_idx,
+                )
+            self._conv_idx = [0]
+            out_ = self.decoder(
+                x[:, :, 1:, :, :],
+                feat_cache=self._feat_map,
+                feat_idx=self._conv_idx,
+                )
+            out = torch.cat([out, out_], 2)
+        else:
+            out = []
+            for i in range(t):
+                self._conv_idx = [0]
+                out.append(self.decoder(
+                    x[:, :, i:(i+1), :, :],
+                    feat_cache=self._feat_map,
+                    feat_idx=self._conv_idx,
+                    ))
+            out = torch.cat(out, 2)
+        # self.clear_cache()
+        return out
+
     def reparameterize(self, mu, log_var):
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
@@ -587,6 +658,17 @@ class WanVAE_(nn.Module):
         self._enc_conv_num = count_conv3d(self.encoder)
         self._enc_conv_idx = [0]
         self._enc_feat_map = [None] * self._enc_conv_num
+
+    def clear_cache_decode(self):
+        self._conv_num = count_conv3d(self.decoder)
+        self._conv_idx = [0]
+        self._feat_map = [None] * self._conv_num
+    
+    def clear_cache_encode(self):
+        self._enc_conv_num = count_conv3d(self.encoder)
+        self._enc_conv_idx = [0]
+        self._enc_feat_map = [None] * self._enc_conv_num
+    
 
 
 def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):

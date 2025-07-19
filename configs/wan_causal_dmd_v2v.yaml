@@ -47,5 +47,5 @@ output_path: /mnt/localssd/wan_causal_dmd
 distillation_loss: dmd
 gradient_checkpointing: true
 backward_simulation: false
-num_frame_per_block: 3
+num_frame_per_block: 1
 warp_denoising_step: false

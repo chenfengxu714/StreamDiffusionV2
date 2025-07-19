@@ -56,6 +56,31 @@ def load_mp4_as_tensor(
 
     return video  # Final shape: [C, T, H, W]
 
+def unfold_2x2_spatial(video: torch.Tensor) -> torch.Tensor:
+    B, C, T, H, W = video.shape
+    assert H % 2 == 0 and W % 2 == 0, "H and W must be divisible by 2"
+    
+    # Reshape to extract 2x2 patches
+    video = video.view(B, C, T, H//2, 2, W//2, 2)  # (B, C, T, H//2, 2, W//2, 2)
+
+    # Rearrange 2x2 into 4 positions
+    video = video.permute(0, 4, 6, 1, 2, 3, 5)  # (B, 2, 2, C, T, H//2, W//2)
+    video = video.contiguous().view(B * 4, C, T, H//2, W//2)  # (B*4, C, T, H//2, W//2)
+
+    return video
+
+
+def fold_2x2_spatial(video: torch.Tensor, original_batch: int) -> torch.Tensor:
+    B4, C, T, H_half, W_half = video.shape
+    assert B4 % 4 == 0 and B4 == original_batch * 4
+
+    video = video.view(original_batch, 2, 2, C, T, H_half, W_half)  # (B, 2, 2, C, T, H//2, W//2)
+    video = video.permute(0, 3, 4, 5, 1, 6, 2)  # (B, C, T, H//2, 2, W//2, 2)
+    video = video.contiguous().view(original_batch, C, T, H_half * 2, W_half * 2)  # (B, C, T, H, W)
+
+    return video
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str)
 parser.add_argument("--checkpoint_folder", type=str)
@@ -64,8 +89,9 @@ parser.add_argument("--prompt_file_path", type=str)
 parser.add_argument("--video_path", type=str)
 parser.add_argument("--noise_scale", type=float, default=0.8)
 parser.add_argument("--height", type=int, default=480)
-parser.add_argument("--width", type=int, default=480)
+parser.add_argument("--width", type=int, default=832)
 parser.add_argument("--fps", type=int, default=16)
+parser.add_argument("--unfold", action="store_true", default=False)
 
 args = parser.parse_args()
 
@@ -79,8 +105,7 @@ for k, v in vars(args).items():
 pipeline = CausalStreamInferencePipeline(config, device="cuda")
 pipeline.to(device="cuda", dtype=torch.bfloat16)
 
-state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")[
-    'generator']
+state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")['generator']
 
 pipeline.generator.load_state_dict(
     state_dict, strict=True
@@ -88,10 +113,14 @@ pipeline.generator.load_state_dict(
 
 input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0) # [1, C, T, H, W]
 input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device="cuda")
+if args.unfold:
+    input_video_original = unfold_2x2_spatial(input_video_original)
 
-chunck_size=(pipeline.num_frame_per_block-1)*4+1
+# chunck_size=(pipeline.num_frame_per_block-1)*4+1
+chunck_size = 4
 overlap = 0
-num_chuncks = (input_video_original.shape[2]-overlap) // (chunck_size-overlap)
+# num_chuncks = (input_video_original.shape[2]-overlap) // (chunck_size-overlap)
+num_chuncks = (input_video_original.shape[2]-1) // chunck_size
 
 dataset = TextDataset(args.prompt_file_path)
 os.makedirs(args.output_folder, exist_ok=True)
@@ -101,49 +130,58 @@ video_list = []
 cost_time = 0
 noise_scale = args.noise_scale
 
+torch.cuda.synchronize()
+start_time = time.time()
+
 for i in range(num_chuncks):
-    torch.cuda.synchronize()
-    start_time = time.time()
 
     if i==0:
         start_idx = 0
-        end_idx = chunck_size
+        end_idx = 5
+        current_start = 0
+        current_end = pipeline.frame_seq_length*2
     else:
-        start_idx = start_idx+chunck_size-overlap
-        end_idx = end_idx+chunck_size-overlap
+        start_idx = end_idx
+        end_idx = end_idx+chunck_size
+        current_start = current_end
+        current_end = current_end+(chunck_size//4)*pipeline.frame_seq_length
 
     input_video = input_video_original[:,:,start_idx:end_idx]
+    
+    latents = pipeline.vae.model.stream_encode(input_video)
 
-    latents = pipeline.vae.model.encode(input_video, [0,1])
     latents = latents.transpose(2,1)
     
     if i==0:
         pipeline.prepare(noise=latents, text_prompts=prompts)
-        noise = torch.randn_like(latents)
 
+    noise = torch.randn_like(latents)
     latents = noise*noise_scale + latents*(1-noise_scale)
 
     video = pipeline.inference(
         noise=latents,
-        current_start=(start_idx//3)*pipeline.frame_seq_length,
-        current_end=(end_idx//3)*pipeline.frame_seq_length,
-    )[0].permute(0, 2, 3, 1).cpu().numpy()
+        current_start=current_start,
+        current_end=current_end,
+    )
 
-    torch.cuda.synchronize()
-    cost_time+=time.time()-start_time
+    if args.unfold:
+        video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
+    video = video[0].permute(0, 2, 3, 1).cpu().numpy()
 
     if i==0:
         video_list.append(video)
     else:
-        # video_list.append(video)
         video_list.append(video[overlap:])
+
+torch.cuda.synchronize()
+cost_time+=time.time()-start_time
 
 video = np.concatenate(video_list, axis=0)
 
 T=video.shape[0]
 
 print(f"Time taken: {cost_time} seconds")
-print(f"FPS: {T/cost_time}")
+print(f"{T} frames, FPS: {T/cost_time}")
 
 export_to_video(
     video, os.path.join(args.output_folder, f"output_{0:03d}.mp4"), fps=args.fps)
