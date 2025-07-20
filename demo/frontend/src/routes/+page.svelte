@@ -133,7 +133,7 @@
             Start
           {/if}
         </Button>
-        <PipelineOptions {pipelineParams}></PipelineOptions>
+        <PipelineOptions {pipelineParams} {pipelineInfo}></PipelineOptions>
       </div>
     </article>
   {:else}

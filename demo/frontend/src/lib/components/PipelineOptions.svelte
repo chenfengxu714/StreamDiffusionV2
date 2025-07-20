@@ -1,14 +1,18 @@
 <script lang="ts">
-  import type { Fields } from '$lib/types';
-  import { FieldType } from '$lib/types';
+  import type { Fields, PipelineInfo } from '$lib/types';
+  import { FieldType, PipelineMode } from '$lib/types';
   import InputRange from './InputRange.svelte';
   import SeedInput from './SeedInput.svelte';
   import TextArea from './TextArea.svelte';
+  import PromptInput from './PromptInput.svelte';
   import Checkbox from './Checkbox.svelte';
   import Selectlist from './Selectlist.svelte';
   import { pipelineValues } from '$lib/store';
 
   export let pipelineParams: Fields;
+  export let pipelineInfo: PipelineInfo;
+  
+  $: isImageMode = pipelineInfo?.input_mode?.default === PipelineMode.IMAGE;
 
   $: advanceOptions = Object.values(pipelineParams)?.filter(
     (e) => e?.hide == true && e?.disabled !== true
@@ -25,7 +29,11 @@
         {:else if params.field === FieldType.SEED}
           <SeedInput {params} bind:value={$pipelineValues[params.id]}></SeedInput>
         {:else if params.field === FieldType.TEXTAREA}
-          <TextArea {params} bind:value={$pipelineValues[params.id]}></TextArea>
+          {#if isImageMode}
+            <PromptInput {params}></PromptInput>
+          {:else}
+            <TextArea {params} bind:value={$pipelineValues[params.id]}></TextArea>
+          {/if}
         {:else if params.field === FieldType.CHECKBOX}
           <Checkbox {params} bind:value={$pipelineValues[params.id]}></Checkbox>
         {:else if params.field === FieldType.SELECT}
@@ -48,7 +56,11 @@
           {:else if params.field === FieldType.SEED}
             <SeedInput {params} bind:value={$pipelineValues[params.id]}></SeedInput>
           {:else if params.field === FieldType.TEXTAREA}
-            <TextArea {params} bind:value={$pipelineValues[params.id]}></TextArea>
+            {#if isImageMode}
+              <PromptInput {params}></PromptInput>
+            {:else}
+              <TextArea {params} bind:value={$pipelineValues[params.id]}></TextArea>
+            {/if}
           {:else if params.field === FieldType.CHECKBOX}
             <Checkbox {params} bind:value={$pipelineValues[params.id]}></Checkbox>
           {:else if params.field === FieldType.SELECT}
