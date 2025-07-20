@@ -4,6 +4,7 @@ import sys
 import os
 import numpy as np
 import time
+import threading
 from omegaconf import OmegaConf
 
 sys.path.append(
@@ -122,31 +123,44 @@ class Pipeline:
         self.current_start = 0
         self.current_end = self.pipeline.frame_seq_length * 2
 
-    def accept_image(self, params: "Pipeline.InputParams"):
+        self.images_lock = threading.Lock()
+        self.model_lock = threading.Lock()
+
+    def accept_new_params(self, params: "Pipeline.InputParams"):
         image_array = self.image_to_array(params.image, self.width, self.height)
-        self.images.append(image_array)
+        with self.images_lock:
+            self.images.append(image_array)
+
+        if params.prompt and self.prompt != params.prompt:
+            self.update_prompt(params.prompt)
+
+    def update_prompt(self, prompt: str):
+        self.prompt = prompt
+        with self.model_lock:
+            self.pipeline.prepare(noise=torch.zeros(1, 1).to(self.device, dtype=torch.bfloat16), text_prompts=[self.prompt])
+            self.current_start = 0
+            self.current_end = self.pipeline.frame_seq_length
 
     def predict(self) -> List[Image.Image]:
+        # time_start = time.time()
         num_frames_needed = self.chunk_size if self.has_started else self.start_chunk_size
-        if len(self.images) + len(self.prevs) >= num_frames_needed:
-            torch.set_grad_enabled(False)
-            time_start = time.time()
+        with self.images_lock:
+            images = self.read_images(num_frames_needed)
+        if len(images) == 0:
+            return []
 
-            num_images = num_frames_needed - len(self.prevs)
-            step = len(self.images) / (num_images - 1)
-            indices = [int(i * step) for i in range(num_images - 1)] + [-1]
-            images = np.stack([self.images[i] for i in indices], axis=0)
-            self.images = []
+        torch.set_grad_enabled(False)
+        if len(self.prevs) > 0:
+            total_images = np.concatenate([self.prevs, images], axis=0)
+        else:
+            total_images = images
+        if self.overlap > 0:
+            self.prevs = total_images[-self.overlap:]
 
-            if len(self.prevs) > 0:
-                total_images = np.concatenate([self.prevs, images], axis=0)
-            else:
-                total_images = images
-            if self.overlap > 0:
-                self.prevs = total_images[-self.overlap:]
+        images = torch.from_numpy(images).unsqueeze(0)
+        images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=self.device)
 
-            images = torch.from_numpy(images).unsqueeze(0)
-            images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=self.device)
+        with self.model_lock:
             latents = self.pipeline.vae.model.stream_encode(images)
             latents = latents.transpose(2,1)
             noise = torch.randn_like(latents)
@@ -158,16 +172,27 @@ class Pipeline:
                     current_start=self.current_start,
                     current_end=self.current_end,
                 )
-            if self.unfold:
-                video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
-            video = video[0].permute(0, 2, 3, 1).cpu().numpy()
             self.current_start = self.current_end
             self.current_end += (self.chunk_size // 4) * self.pipeline.frame_seq_length
             self.has_started = True
-            time_end = time.time()
-            print(f"FPS model: {len(video) / (time_end - time_start)}")
-            return [self.array_to_image(image) for image in video[self.overlap:]]
-        return []
+
+        if self.unfold:
+            video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
+        video = video[0].permute(0, 2, 3, 1).cpu().numpy()
+
+        # time_end = time.time()
+        # print(f"FPS model: {len(video) / (time_end - time_start)}")
+        return [self.array_to_image(image) for image in video[self.overlap:]]
+
+    def read_images(self, num_images: int):
+        if len(self.images) + len(self.prevs) >= num_images:
+            step = len(self.images) / (num_images - 1)
+            indices = [int(i * step) for i in range(num_images - 1)] + [-1]
+            images = np.stack([self.images[i] for i in indices], axis=0)
+            self.images = []
+            return images
+        else:
+            return []
 
     def image_to_array(
         self, image: Image.Image,

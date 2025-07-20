@@ -62,7 +62,6 @@ class App:
             if not self.conn_manager.check_user(user_id):
                 return HTTPException(status_code=404, detail="User not found")
             last_time = time.time()
-            # index = 0
             try:
                 while True:
                     if (
@@ -97,9 +96,6 @@ class App:
                             continue
                         params.image = bytes_to_pil(image_data)
                     await self.conn_manager.update_data(user_id, params)
-                    # print(f"frame {index} client timestamp: {data['timestamp']}")
-                    # print(f"frame {index} server received, time: {time.time()}")
-                    # index += 1
                     await self.conn_manager.send_json(user_id, {"status": "wait"})
 
             except Exception as e:
@@ -115,31 +111,22 @@ class App:
         async def stream(user_id: uuid.UUID, request: Request):
             try:
                 async def push_frames_to_pipeline():
-                    # index = 0
                     last_params = SimpleNamespace()
                     while True:
                         params = await self.conn_manager.get_latest_data(user_id)
                         if vars(params) and params.__dict__ != last_params.__dict__:
                             last_params = params
-                            # print(f"frame {index} push start, time: {time.time()}")
-                            self.pipeline.accept_image(params)
-                            # print(f"frame {index} pushed, time: {time.time()}")
-                            # index += 1
+                            self.pipeline.accept_new_params(params)
                         await self.conn_manager.send_json(
                             user_id, {"status": "send_frame"}
                         )
 
                 def produce_predictions(user_id, loop):
-                    # index = 0
                     while True:
-                        # start_time = time.time()
                         images = self.pipeline.predict()
                         if len(images) == 0:
                             time.sleep(THROTTLE)
                             continue
-                        # print(f"model {index} start, time: {start_time}")
-                        # print(f"model outputs {index}, time: {time.time()}")
-                        # index += 9
                         for image in images:
                             frame = pil_to_frame(image)
                             asyncio.run_coroutine_threadsafe(
@@ -151,7 +138,6 @@ class App:
                     last_queue_size = 0
                     sleep_time = 1 / 30
                     # start_time = time.time()
-                    # all_time = 0
                     # index = 0
                     while True:
                         queue_size = await self.conn_manager.get_output_queue_size(user_id)
@@ -167,9 +153,8 @@ class App:
                             yield frame
                             if not is_firefox(request.headers["user-agent"]):
                                 yield frame
-                            # all_time = time.time() - start_time
                             # index += 1
-                            # print(f"FPS: {index / all_time}")
+                            # print(f"FPS: {index / time.time() - start_time}")
                         except Exception as e:
                             print(f"Frame fetch error: {e}")
                             break
