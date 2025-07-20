@@ -150,6 +150,8 @@ class App:
                     last_burst_time = time.time()
                     last_queue_size = 0
                     sleep_time = 1 / 30
+                    # start_time = time.time()
+                    # all_time = 0
                     # index = 0
                     while True:
                         queue_size = await self.conn_manager.get_output_queue_size(user_id)
@@ -165,8 +167,9 @@ class App:
                             yield frame
                             if not is_firefox(request.headers["user-agent"]):
                                 yield frame
-                            # print(f"frame {index} sent, time: {time.time()}")
+                            # all_time = time.time() - start_time
                             # index += 1
+                            # print(f"FPS: {index / all_time}")
                         except Exception as e:
                             print(f"Frame fetch error: {e}")
                             break
@@ -214,7 +217,7 @@ class App:
         )
 
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 _pipeline = None
 def get_pipeline():

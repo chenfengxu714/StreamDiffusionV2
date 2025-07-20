@@ -52,6 +52,16 @@ href="https://huggingface.co/runwayml/stable-diffusion-v1-5"
 </p>
 """
 
+def fold_2x2_spatial(video: torch.Tensor, original_batch: int) -> torch.Tensor:
+    B4, C, T, H_half, W_half = video.shape
+    assert B4 % 4 == 0 and B4 == original_batch * 4
+
+    video = video.view(original_batch, 2, 2, C, T, H_half, W_half)  # (B, 2, 2, C, T, H//2, W//2)
+    video = video.permute(0, 3, 4, 5, 1, 6, 2)  # (B, C, T, H//2, 2, W//2, 2)
+    video = video.contiguous().view(original_batch, C, T, H_half * 2, W_half * 2)  # (B, C, T, H, W)
+
+    return video
+
 
 class Pipeline:
     class Info(BaseModel):
@@ -69,10 +79,10 @@ class Pipeline:
             id="prompt",
         )
         width: int = Field(
-            192, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
+            400, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
         )
         height: int = Field(
-            192, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
+            400, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
         )
 
     def __init__(self, args: Args, device: torch.device):
@@ -96,37 +106,38 @@ class Pipeline:
             state_dict, strict=True
         )
 
-        self.chunk_size = (self.pipeline.num_frame_per_block - 1) * 4 + 1
-        self.chunk_size = 9
+        self.chunk_size = 4
+        self.start_chunk_size = 5
+        self.has_started = False
+        self.overlap = args.overlap
         self.width = params.width
         self.height = params.height
-        self.overlap = args.overlap
+        self.unfold = args.unfold
 
         self.prompt = params.prompt
-        self.noise = torch.randn(1, 3, 16, self.height // 8, self.width // 8).to(
-            device=self.device, dtype=torch.bfloat16
-        )
         self.noise_scale = args.noise_scale
-        self.pipeline.prepare(noise=self.noise, text_prompts=[self.prompt])
+        self.pipeline.prepare(noise=torch.zeros(1, 1).to(self.device, dtype=torch.bfloat16), text_prompts=[self.prompt])
         self.images = []
         self.prevs = []
         self.current_start = 0
-        self.current_end = self.chunk_size
+        self.current_end = self.pipeline.frame_seq_length * 2
 
     def accept_image(self, params: "Pipeline.InputParams"):
         image_array = self.image_to_array(params.image, self.width, self.height)
         self.images.append(image_array)
 
     def predict(self) -> List[Image.Image]:
-        if len(self.images) + len(self.prevs) >= self.chunk_size:
+        num_frames_needed = self.chunk_size if self.has_started else self.start_chunk_size
+        if len(self.images) + len(self.prevs) >= num_frames_needed:
             torch.set_grad_enabled(False)
             time_start = time.time()
 
-            num_images = self.chunk_size - len(self.prevs)
+            num_images = num_frames_needed - len(self.prevs)
             step = len(self.images) / (num_images - 1)
             indices = [int(i * step) for i in range(num_images - 1)] + [-1]
             images = np.stack([self.images[i] for i in indices], axis=0)
             self.images = []
+
             if len(self.prevs) > 0:
                 total_images = np.concatenate([self.prevs, images], axis=0)
             else:
@@ -136,40 +147,26 @@ class Pipeline:
 
             images = torch.from_numpy(images).unsqueeze(0)
             images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=self.device)
-            latents = self.pipeline.vae.model.encode(images, [0,1])
+            latents = self.pipeline.vae.model.stream_encode(images)
             latents = latents.transpose(2,1)
-            latents = self.noise * self.noise_scale + latents * (1 - self.noise_scale)
-
-            # Calculate sequence positions, but keep them within KV cache bounds
-            max_seq_length = self.pipeline.frame_seq_length * 30  # KV cache size
-            current_start = ((self.current_start // 3) * self.pipeline.frame_seq_length) % max_seq_length
-            current_end = ((self.current_end // 3) * self.pipeline.frame_seq_length) % max_seq_length
-
-            # Ensure current_end is never 0 and is always greater than current_start
-            if current_end < current_start:
-                self.current_start += self.chunk_size
-                self.current_end += self.chunk_size
-                current_start = ((self.current_start // 3) * self.pipeline.frame_seq_length) % max_seq_length
-                current_end = ((self.current_end // 3) * self.pipeline.frame_seq_length) % max_seq_length
+            noise = torch.randn_like(latents)
+            latents = noise * self.noise_scale + latents * (1 - self.noise_scale)
 
             with torch.inference_mode():
                 video = self.pipeline.inference(
                     noise=latents,
-                    current_start=current_start,
-                    current_end=current_end,
-                )[0].permute(0, 2, 3, 1).cpu().numpy()
-            self.current_start += self.chunk_size
-            self.current_end += self.chunk_size
+                    current_start=self.current_start,
+                    current_end=self.current_end,
+                )
+            if self.unfold:
+                video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
+            video = video[0].permute(0, 2, 3, 1).cpu().numpy()
+            self.current_start = self.current_end
+            self.current_end += (self.chunk_size // 4) * self.pipeline.frame_seq_length
+            self.has_started = True
             time_end = time.time()
             print(f"FPS model: {len(video) / (time_end - time_start)}")
             return [self.array_to_image(image) for image in video[self.overlap:]]
-            # For testing io sync without model
-            # outputs = [
-            #     Image.fromarray(((image + 1) * 127.5).astype(np.uint8))
-            #     for image in images
-            # ]
-            # time.sleep(1)
-            # return outputs
         return []
 
     def image_to_array(
