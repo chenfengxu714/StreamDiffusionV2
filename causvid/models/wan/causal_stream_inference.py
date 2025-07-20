@@ -33,6 +33,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.num_transformer_blocks = 30
         scale_size = 16
         self.frame_seq_length = (args.height//scale_size) * (args.width//scale_size)
+        self.kv_cache_length = self.frame_seq_length*args.num_kv_cache
         if args.unfold:
             self.frame_seq_length = self.frame_seq_length // 4
         self.conditional_dict = None
@@ -56,9 +57,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         for _ in range(self.num_transformer_blocks):
             kv_cache1.append({
-                "k": torch.zeros([batch_size, self.frame_seq_length*30, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, self.frame_seq_length*30, 12, 128], dtype=dtype, device=device),
-                "end_point": self.frame_seq_length*self.num_frame_per_block
+                "k": torch.zeros([batch_size, self.kv_cache_length, 12, 128], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, self.kv_cache_length, 12, 128], dtype=dtype, device=device),
             })
 
         self.kv_cache1 = kv_cache1  # always store the clean cache
@@ -154,12 +154,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             current_end=current_end
         )
 
-        # for i in range(self.num_transformer_blocks):
-        #     self.kv_cache1[i]["end_point"] = current_end
-
         # Step 3: Decode the output
         video = self.vae.stream_decode_to_pixel(denoised_pred)
-        # video = self.vae.model.decode(denoised_pred.transpose(1,2), [0,1]).transpose(1,2).float()
         video = (video * 0.5 + 0.5).clamp(0, 1)
 
         return video

@@ -16,7 +16,6 @@ from diffusers.models.modeling_utils import ModelMixin
 import torch.nn as nn
 import torch
 import math
-import time
 
 # wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
 # see https://github.com/pytorch/pytorch/issues/133254
@@ -138,10 +137,17 @@ class CausalWanSelfAttention(nn.Module):
             roped_key = causal_rope_apply(
                 k, grid_sizes, freqs, start_frame=current_start // math.prod(grid_sizes[0][1:]).item()).type_as(v)
 
-            kv_cache["k"][:, current_start:current_end] = roped_key
-            kv_cache["v"][:, current_start:current_end] = v
+            max_len = kv_cache["k"].size(1)
 
-            x = attention(roped_query, kv_cache["k"][:, :current_end], kv_cache["v"][:, :current_end])
+            write_range = torch.arange(current_start, current_end) % max_len
+            kv_cache["k"][:, write_range] = roped_key
+            kv_cache["v"][:, write_range] = v
+
+            read_start = max(0, current_end - max_len)
+            read_end = current_end
+            read_range = torch.arange(read_start, read_end) % max_len
+
+            x = attention(roped_query, kv_cache["k"][:, read_range], kv_cache["v"][:, read_range])
 
         # output
         x = x.flatten(2)

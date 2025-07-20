@@ -48,4 +48,5 @@ distillation_loss: dmd
 gradient_checkpointing: true
 backward_simulation: false
 num_frame_per_block: 1
+num_kv_cache: 9
 warp_denoising_step: false
