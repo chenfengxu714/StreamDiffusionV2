@@ -506,7 +506,7 @@ class WanVAE_(nn.Module):
         self.conv2 = CausalConv3d(z_dim, z_dim, 1)
         self.decoder = Decoder3d(dim, z_dim, dim_mult, num_res_blocks,
                                  attn_scales, self.temperal_upsample, dropout)
-        self.fist_batch = True
+        self.first_batch = True
 
     def forward(self, x):
         mu, log_var = self.encode(x)
@@ -545,7 +545,7 @@ class WanVAE_(nn.Module):
     def stream_encode(self, x):
         # cache
         t = x.shape[2]
-        if self.fist_batch:
+        if self.first_batch:
             self.clear_cache_encode()
             self._enc_conv_idx = [0]
             out = self.encoder(
@@ -609,9 +609,9 @@ class WanVAE_(nn.Module):
         else:
             z = z / scale[1] + scale[0]
         x = self.conv2(z)
-        if self.fist_batch:
+        if self.first_batch:
             self.clear_cache_decode()
-            self.fist_batch = False
+            self.first_batch = False
             self._conv_idx = [0]
             out = self.decoder(
                 x[:, :, :1, :, :],

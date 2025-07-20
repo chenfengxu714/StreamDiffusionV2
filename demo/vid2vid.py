@@ -109,7 +109,7 @@ class Pipeline:
 
         self.chunk_size = 4
         self.start_chunk_size = 5
-        self.has_started = False
+        self.first_batch = True
         self.overlap = args.overlap
         self.width = params.width
         self.height = params.height
@@ -138,29 +138,32 @@ class Pipeline:
         self.prompt = prompt
         with self.model_lock:
             self.pipeline.prepare(noise=torch.zeros(1, 1).to(self.device, dtype=torch.bfloat16), text_prompts=[self.prompt])
+            self.pipeline.vae.model.first_batch = True
             self.current_start = 0
-            self.current_end = self.pipeline.frame_seq_length
+            self.current_end = self.pipeline.frame_seq_length * 2
+            self.first_batch = True
+            self.prevs = []
 
     def predict(self) -> List[Image.Image]:
         # time_start = time.time()
-        num_frames_needed = self.chunk_size if self.has_started else self.start_chunk_size
-        with self.images_lock:
-            images = self.read_images(num_frames_needed)
-        if len(images) == 0:
-            return []
-
-        torch.set_grad_enabled(False)
-        if len(self.prevs) > 0:
-            total_images = np.concatenate([self.prevs, images], axis=0)
-        else:
-            total_images = images
-        if self.overlap > 0:
-            self.prevs = total_images[-self.overlap:]
-
-        images = torch.from_numpy(images).unsqueeze(0)
-        images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=self.device)
-
         with self.model_lock:
+            num_frames_needed = self.start_chunk_size if self.first_batch else self.chunk_size
+            with self.images_lock:
+                images = self.read_images(num_frames_needed)
+            if len(images) == 0:
+                return []
+
+            torch.set_grad_enabled(False)
+            if len(self.prevs) > 0:
+                total_images = np.concatenate([self.prevs, images], axis=0)
+            else:
+                total_images = images
+            if self.overlap > 0:
+                self.prevs = total_images[-self.overlap:]
+
+            images = torch.from_numpy(images).unsqueeze(0)
+            images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=self.device)
+
             latents = self.pipeline.vae.model.stream_encode(images)
             latents = latents.transpose(2,1)
             noise = torch.randn_like(latents)
@@ -174,7 +177,7 @@ class Pipeline:
                 )
             self.current_start = self.current_end
             self.current_end += (self.chunk_size // 4) * self.pipeline.frame_seq_length
-            self.has_started = True
+            self.first_batch = False
 
         if self.unfold:
             video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
