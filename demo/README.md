@@ -17,20 +17,10 @@ nvm install 18
 ### Install
 
 You need Node.js 18+ and Python 3.10 to run this example.
-Please make sure you've installed all dependencies according to the [installation instructions](../../README.md#installation).
+Please make sure you've installed all dependencies according to the [installation instructions](../README.md#installation).
 
-```bash
-cd frontend
-npm i
-npm run build
-cd ..
+```
 pip install -r requirements.txt
-python main.py 
-```
-
-or 
-
-```
 chmod +x start.sh
 ./start.sh
 ```
