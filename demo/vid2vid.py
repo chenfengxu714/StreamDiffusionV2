@@ -23,7 +23,7 @@ from PIL import Image
 from typing import List
 
 
-default_prompt = "A woman is talking"
+default_prompt = "A dog is walking"
 
 page_content = """<h1 class="text-3xl font-bold">StreamV2V</h1>
 <p class="text-sm">
@@ -144,6 +144,15 @@ class Pipeline:
             self.first_batch = True
             self.prevs = []
 
+    def clear_images(self):
+        with self.images_lock:
+            self.images = []
+        with self.model_lock:
+            self.prevs = []
+            self.first_batch = True
+            self.current_start = 0
+            self.current_end = self.pipeline.frame_seq_length * 2
+
     def predict(self) -> List[Image.Image]:
         # time_start = time.time()
         with self.model_lock:
@@ -178,6 +187,8 @@ class Pipeline:
             self.current_start = self.current_end
             self.current_end += (self.chunk_size // 4) * self.pipeline.frame_seq_length
             self.first_batch = False
+            # images = (images + 1) * 127.5
+            # video = torch.from_numpy(images).permute(0, 3, 1, 2).unsqueeze(0)
 
         if self.unfold:
             video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)

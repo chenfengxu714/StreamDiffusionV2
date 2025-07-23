@@ -15,6 +15,7 @@ import os
 import time
 import mimetypes
 import torch
+import threading
 
 from config import config, Args
 from util import pil_to_frame, bytes_to_pil, is_firefox
@@ -34,6 +35,8 @@ class App:
         self.pipeline = pipeline
         self.app = FastAPI()
         self.conn_manager = ConnectionManager()
+        self.produce_predictions_stop_event = None
+        self.produce_predictions_task = None
         self.init_app()
 
     def init_app(self):
@@ -55,7 +58,11 @@ class App:
             except ServerFullException as e:
                 logging.error(f"Server Full: {e}")
             finally:
-                await self.conn_manager.disconnect(user_id)
+                await self.conn_manager.disconnect(user_id, self.pipeline)
+                if self.produce_predictions_stop_event is not None:
+                    self.produce_predictions_stop_event.set()
+                if self.produce_predictions_task is not None:
+                    self.produce_predictions_task.cancel()
                 logging.info(f"User disconnected: {user_id}")
 
         async def handle_websocket_data(user_id: uuid.UUID):
@@ -75,7 +82,7 @@ class App:
                                 "message": "Your session has ended",
                             },
                         )
-                        await self.conn_manager.disconnect(user_id)
+                        await self.conn_manager.disconnect(user_id, self.pipeline)
                         return
                     data = await self.conn_manager.receive_json(user_id)
                     if data["status"] != "next_frame":
@@ -100,7 +107,7 @@ class App:
 
             except Exception as e:
                 logging.error(f"Websocket Error: {e}, {user_id} ")
-                await self.conn_manager.disconnect(user_id)
+                await self.conn_manager.disconnect(user_id, self.pipeline)
 
         @self.app.get("/api/queue")
         async def get_queue_size():
@@ -121,13 +128,15 @@ class App:
                             user_id, {"status": "send_frame"}
                         )
 
-                def produce_predictions(user_id, loop):
-                    while True:
+                def produce_predictions(user_id, loop, stop_event):
+                    while not stop_event.is_set():
                         images = self.pipeline.predict()
                         if len(images) == 0:
                             time.sleep(THROTTLE)
                             continue
                         for image in images:
+                            if stop_event.is_set():
+                                break
                             frame = pil_to_frame(image)
                             asyncio.run_coroutine_threadsafe(
                                 self.conn_manager.put_frame(user_id, frame), loop
@@ -150,6 +159,8 @@ class App:
                         last_queue_size = queue_size
                         try:
                             frame = await self.conn_manager.get_frame(user_id)
+                            if frame is None:
+                                break
                             yield frame
                             if not is_firefox(request.headers["user-agent"]):
                                 yield frame
@@ -161,10 +172,11 @@ class App:
 
                         await asyncio.sleep(sleep_time)
 
-                asyncio.create_task(push_frames_to_pipeline())
-                asyncio.create_task(asyncio.to_thread(
-                    produce_predictions, user_id, asyncio.get_running_loop()
+                self.produce_predictions_stop_event = threading.Event()
+                self.produce_predictions_task = asyncio.create_task(asyncio.to_thread(
+                    produce_predictions, user_id, asyncio.get_running_loop(), self.produce_predictions_stop_event
                 ))
+                asyncio.create_task(push_frames_to_pipeline())
                 await self.conn_manager.send_json(user_id, {"status": "send_frame"})
 
                 return StreamingResponse(
@@ -174,6 +186,9 @@ class App:
                 )
             except Exception as e:
                 logging.error(f"Streaming Error: {e}, {user_id} ")
+                # Stop prediction thread on error
+                if self.produce_predictions_stop_event is not None:
+                    self.produce_predictions_stop_event.set()
                 return HTTPException(status_code=404, detail="User not found")
 
         # route to setup frontend

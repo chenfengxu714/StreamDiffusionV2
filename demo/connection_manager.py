@@ -4,6 +4,7 @@ import asyncio
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
 import logging
+from vid2vid import Pipeline
 from types import SimpleNamespace
 
 Connections = Dict[UUID, Dict[str, Union[WebSocket, asyncio.Queue]]]
@@ -24,13 +25,13 @@ class ConnectionManager:
     ):
         await websocket.accept()
         user_count = self.get_user_count()
-        print(f"User count: {user_count}")
+        print(f"[ConnectionManager] User count: {user_count}")
         if max_queue_size > 0 and user_count >= max_queue_size:
-            print("Server is full")
+            print("[ConnectionManager] Server is full")
             await websocket.send_json({"status": "error", "message": "Server is full"})
             await websocket.close()
             raise ServerFullException("Server is full")
-        print(f"New user connected: {user_id}")
+        print(f"[ConnectionManager] New user connected: {user_id}")
         self.active_connections[user_id] = {
             "websocket": websocket,
             "queue": asyncio.Queue(),
@@ -66,12 +67,19 @@ class ConnectionManager:
                 return None
 
     def delete_user(self, user_id: UUID):
+        print(f"[ConnectionManager] Deleting user: {user_id}")
         user_session = self.active_connections.pop(user_id, None)
         if user_session:
             queue = user_session["queue"]
+            output_queue = user_session["output_queue"]
             while not queue.empty():
                 try:
                     queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    continue
+            while not output_queue.empty():
+                try:
+                    output_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     continue
 
@@ -86,11 +94,20 @@ class ConnectionManager:
                 return user_session["websocket"]
         return None
 
-    async def disconnect(self, user_id: UUID):
-        websocket = self.get_websocket(user_id)
-        if websocket:
-            await websocket.close()
-        self.delete_user(user_id)
+    async def disconnect(self, user_id: UUID, pipeline: Pipeline):
+        print(f"[ConnectionManager] Disconnecting user: {user_id}")
+        try:
+            websocket = self.get_websocket(user_id)
+            if websocket:
+                await websocket.close()
+        except Exception as e:
+            logging.error(f"Error: Exception while closing websocket for {user_id}: {e}")
+        finally:
+            try:
+                self.delete_user(user_id)
+                pipeline.clear_images()
+            except Exception as e:
+                logging.error(f"Error: Exception while clearing images for {user_id}: {e}")
 
     async def send_json(self, user_id: UUID, data: Dict):
         try:

@@ -29,7 +29,7 @@
     <img
       bind:this={imageEl}
       class="aspect-square w-full rounded-lg"
-      src={'/api/stream/' + $streamId}
+      src={'/api/stream/' + $streamId + '?t=' + Date.now()}
     />
     <div class="absolute bottom-1 right-1">
       <Button
