@@ -1,4 +1,4 @@
-from typing import Dict, Union
+from typing import Dict, List, Union
 from uuid import UUID
 import asyncio
 from fastapi import WebSocket
@@ -133,16 +133,17 @@ class ConnectionManager:
         except Exception as e:
             logging.error(f"Error: Receive bytes: {e}")
 
-    async def put_frame(self, user_id: UUID, frame: bytes):
+    async def put_frames_to_output_queue(self, user_id: UUID, frames: List[bytes]):
         session = self.active_connections.get(user_id)
         if session:
             queue = session["output_queue"]
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            await queue.put(frame)
+            for frame in frames:
+                if queue.full():
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                await queue.put(frame)
 
     async def get_frame(self, user_id: UUID) -> bytes:
         session = self.active_connections.get(user_id)

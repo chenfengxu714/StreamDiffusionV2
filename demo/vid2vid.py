@@ -6,6 +6,7 @@ import numpy as np
 import time
 import threading
 from omegaconf import OmegaConf
+import random
 
 sys.path.append(
     os.path.join(
@@ -189,6 +190,8 @@ class Pipeline:
             self.first_batch = False
             # images = (images + 1) * 127.5
             # video = torch.from_numpy(images).permute(0, 3, 1, 2).unsqueeze(0)
+            # random_sleep = random.uniform(0.3, 0.5)
+            # time.sleep(random_sleep)
 
         if self.unfold:
             video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)

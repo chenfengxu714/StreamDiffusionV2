@@ -69,6 +69,7 @@ class App:
             if not self.conn_manager.check_user(user_id):
                 return HTTPException(status_code=404, detail="User not found")
             last_time = time.time()
+            last_frame_time = None
             try:
                 while True:
                     if (
@@ -104,6 +105,11 @@ class App:
                         params.image = bytes_to_pil(image_data)
                     await self.conn_manager.update_data(user_id, params)
                     await self.conn_manager.send_json(user_id, {"status": "wait"})
+                    if last_frame_time is None:
+                        last_frame_time = time.time()
+                    else:
+                        # print(f"Frame time: {time.time() - last_frame_time}")
+                        last_frame_time = time.time()
 
             except Exception as e:
                 logging.error(f"Websocket Error: {e}, {user_id} ")
@@ -128,34 +134,33 @@ class App:
                             user_id, {"status": "send_frame"}
                         )
 
-                def produce_predictions(user_id, loop, stop_event):
-                    while not stop_event.is_set():
-                        images = self.pipeline.predict()
-                        if len(images) == 0:
-                            time.sleep(THROTTLE)
-                            continue
-                        for image in images:
-                            if stop_event.is_set():
-                                break
-                            frame = pil_to_frame(image)
-                            asyncio.run_coroutine_threadsafe(
-                                self.conn_manager.put_frame(user_id, frame), loop
-                            )
-
                 async def generate():
+                    MIN_FPS = 5
+                    MAX_FPS = 30
+                    SMOOTHING = 0.8  # EMA smoothing factor
+
                     last_burst_time = time.time()
                     last_queue_size = 0
-                    sleep_time = 1 / 30
-                    # start_time = time.time()
-                    # index = 0
+                    sleep_time = 1 / 20  # Initial guess
+                    last_frame_time = None
+
+                    # Initialize moving average frame interval
+                    ema_frame_interval = sleep_time
                     while True:
                         queue_size = await self.conn_manager.get_output_queue_size(user_id)
-                        # print(f"Queue size: {queue_size}")
+                        print(f"Queue size: {queue_size}")
                         if queue_size > last_queue_size:
+                            # A new burst has come in
                             current_burst_time = time.time()
-                            estimated_gap = current_burst_time - last_burst_time
-                            sleep_time = estimated_gap / queue_size
+                            elapsed = current_burst_time - last_burst_time
+
+                            if queue_size > 0 and elapsed > 0:
+                                raw_interval = elapsed / queue_size
+                                ema_frame_interval = SMOOTHING * ema_frame_interval + (1 - SMOOTHING) * raw_interval
+                                sleep_time = min(max(ema_frame_interval, 1 / MAX_FPS), 1 / MIN_FPS)
+
                             last_burst_time = current_burst_time
+
                         last_queue_size = queue_size
                         try:
                             frame = await self.conn_manager.get_frame(user_id)
@@ -164,13 +169,30 @@ class App:
                             yield frame
                             if not is_firefox(request.headers["user-agent"]):
                                 yield frame
-                            # index += 1
-                            # print(f"FPS: {index / time.time() - start_time}")
+                            if last_frame_time is None:
+                                last_frame_time = time.time()
+                            else:
+                                # print(f"Frame time: {time.time() - last_frame_time}")
+                                last_frame_time = time.time()
                         except Exception as e:
                             print(f"Frame fetch error: {e}")
                             break
 
                         await asyncio.sleep(sleep_time)
+
+                def produce_predictions(user_id, loop, stop_event):
+                    while not stop_event.is_set():
+                        images = self.pipeline.predict()
+                        if len(images) == 0:
+                            time.sleep(THROTTLE)
+                            continue
+                        asyncio.run_coroutine_threadsafe(
+                            self.conn_manager.put_frames_to_output_queue(
+                                user_id,
+                                list(map(pil_to_frame, images))
+                            ),
+                            loop
+                        )
 
                 self.produce_predictions_stop_event = threading.Event()
                 self.produce_predictions_task = asyncio.create_task(asyncio.to_thread(
@@ -184,6 +206,7 @@ class App:
                     media_type="multipart/x-mixed-replace;boundary=frame",
                     headers={"Cache-Control": "no-cache"},
                 )
+
             except Exception as e:
                 logging.error(f"Streaming Error: {e}, {user_id} ")
                 # Stop prediction thread on error
