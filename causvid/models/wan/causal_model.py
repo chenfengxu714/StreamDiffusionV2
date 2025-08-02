@@ -369,6 +369,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
 
+        self.repa_layer = -1 # -1 means no repa layer
+        self.repa_hidden_states = None
+
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -679,7 +682,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 return module(*inputs, **kwargs)
             return custom_forward
 
-        for block in self.blocks:
+        for block_index, block in enumerate(self.blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 x = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
@@ -688,6 +691,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 )
             else:
                 x = block(x, **kwargs)
+            if block_index == self.repa_layer:
+                self.repa_hidden_states = x.clone()
 
         # head
         x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))

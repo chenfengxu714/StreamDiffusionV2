@@ -155,7 +155,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         )
 
         # Step 3: Decode the output
-        video = self.vae.stream_decode_to_pixel(denoised_pred)
-        video = (video * 0.5 + 0.5).clamp(0, 1)
+        # video = self.vae.stream_decode_to_pixel(denoised_pred)    
+        # video = (video * 0.5 + 0.5).clamp(0, 1)
 
-        return video
+        return denoised_pred

@@ -97,6 +97,7 @@ class Trainer:
             lr=config.lr,
             betas=(config.beta1, config.beta2)
         )
+        self.generator_optimizer.zero_grad()
 
         self.critic_optimizer = torch.optim.AdamW(
             [param for param in self.distillation_model.fake_score.parameters()
@@ -104,6 +105,7 @@ class Trainer:
             lr=config.lr,
             betas=(config.beta1, config.beta2)
         )
+        self.critic_optimizer.zero_grad()
 
         # Step 3: Initialize the dataloader
 
@@ -113,16 +115,19 @@ class Trainer:
             dataset = TextDataset(config.data_path)
         else:
             dataset = ODERegressionLMDBDataset(
-                config.data_path, max_pair=int(1e8))
+                config.data_path, max_pair=int(1e8), load_video=True if config.is_repa else False)
         sampler = torch.utils.data.distributed.DistributedSampler(
             dataset, shuffle=True, drop_last=True)
         dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=config.batch_size, sampler=sampler)
+            dataset, batch_size=config.batch_size, sampler=sampler, num_workers=8)
         self.dataloader = cycle(dataloader)
 
         self.step = 0
         self.max_grad_norm = 10.0
         self.previous_time = None
+        
+        self.gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 8)
+        self.accumulation_step = 0
 
     def save(self):
         print("Start gathering distributed model states...")
@@ -158,9 +163,11 @@ class Trainer:
             text_prompts = batch["prompts"]
             clean_latent = batch["ode_latent"][:, -1].to(
                 device=self.device, dtype=self.dtype)
+            video_tensor = batch["video_tensor"].to(device=self.device, dtype=self.dtype)
         else:
             text_prompts = next(self.dataloader)
             clean_latent = None
+            video_tensor = None
 
         batch_size = len(text_prompts)
         image_or_video_shape = list(self.config.image_or_video_shape)
@@ -180,48 +187,64 @@ class Trainer:
             else:
                 unconditional_dict = self.unconditional_dict
 
-        # Step 3: Train the generator
+        # Step 3: Train the generator with gradient accumulation
         if TRAIN_GENERATOR:
             generator_loss, generator_log_dict = self.distillation_model.generator_loss(
                 image_or_video_shape=image_or_video_shape,
                 conditional_dict=conditional_dict,
                 unconditional_dict=unconditional_dict,
-                clean_latent=clean_latent
+                clean_latent=clean_latent,
+                video_tensor=video_tensor
             )
-
-            self.generator_optimizer.zero_grad()
+            
+            # Scale loss for gradient accumulation
+            generator_loss = generator_loss / self.gradient_accumulation_steps
             generator_loss.backward()
-            generator_grad_norm = self.distillation_model.generator.clip_grad_norm_(
-                self.max_grad_norm)
-            self.generator_optimizer.step()
+            
+            # Only update on the last accumulation step
+            if (self.accumulation_step + 1) % self.gradient_accumulation_steps == 0:
+                generator_grad_norm = self.distillation_model.generator.clip_grad_norm_(
+                    self.max_grad_norm)
+                self.generator_optimizer.step()
+                self.generator_optimizer.zero_grad()
+            else:
+                generator_grad_norm = torch.tensor(0.0, device=self.device)
         else:
             generator_log_dict = {}
+            generator_grad_norm = torch.tensor(0.0, device=self.device)
 
-        # Step 4: Train the critic
+        # Step 4: Train the critic with gradient accumulation
         critic_loss, critic_log_dict = self.distillation_model.critic_loss(
             image_or_video_shape=image_or_video_shape,
             conditional_dict=conditional_dict,
             unconditional_dict=unconditional_dict,
             clean_latent=clean_latent
         )
-
-        self.critic_optimizer.zero_grad()
+        
+        # Scale loss for gradient accumulation
+        critic_loss = critic_loss / self.gradient_accumulation_steps
         critic_loss.backward()
-        critic_grad_norm = self.distillation_model.fake_score.clip_grad_norm_(
-            self.max_grad_norm)
-        self.critic_optimizer.step()
+        
+        # Only update on the last accumulation step
+        if (self.accumulation_step + 1) % self.gradient_accumulation_steps == 0:
+            critic_grad_norm = self.distillation_model.fake_score.clip_grad_norm_(
+                self.max_grad_norm)
+            self.critic_optimizer.step()
+            self.critic_optimizer.zero_grad()
+        else:
+            critic_grad_norm = torch.tensor(0.0, device=self.device)
 
-        # Step 5: Logging
-        if self.is_main_process:
+        # Step 5: Logging (only on the last accumulation step)
+        if (self.accumulation_step + 1) % self.gradient_accumulation_steps == 0 and self.is_main_process:
             wandb_loss_dict = {
-                "critic_loss": critic_loss.item(),
+                "critic_loss": critic_loss.item() * self.gradient_accumulation_steps,  # Scale back for logging
                 "critic_grad_norm": critic_grad_norm.item()
             }
 
             if TRAIN_GENERATOR:
                 wandb_loss_dict.update(
                     {
-                        "generator_loss": generator_loss.item(),
+                        "generator_loss": generator_loss.item() * self.gradient_accumulation_steps,  # Scale back for logging
                         "generator_grad_norm": generator_grad_norm.item(),
                         "dmdtrain_gradient_norm": generator_log_dict["dmdtrain_gradient_norm"].item()
                     }
@@ -231,6 +254,9 @@ class Trainer:
                 self.add_visualization(generator_log_dict, critic_log_dict, wandb_loss_dict)
 
             wandb.log(wandb_loss_dict, step=self.step)
+        
+        # Update accumulation step
+        self.accumulation_step += 1
 
     def add_visualization(self, generator_log_dict, critic_log_dict, wandb_loss_dict):
         critictrain_latent, critictrain_noisy_latent, critictrain_pred_image = map(
@@ -266,21 +292,24 @@ class Trainer:
     def train(self):
         while True:
             self.train_one_step()
-            if (not self.config.no_save) and self.step % self.config.log_iters == 0:
-                self.save()
-                torch.cuda.empty_cache()
+            
+            # Only increment step and perform logging/saving after gradient accumulation is complete
+            if (self.accumulation_step) % self.gradient_accumulation_steps == 0:
+                if (not self.config.no_save) and self.step % self.config.log_iters == 0:
+                    self.save()
+                    torch.cuda.empty_cache()
 
-            barrier()
-            if self.is_main_process:
-                current_time = time.time()
-                if self.previous_time is None:
-                    self.previous_time = current_time
-                else:
-                    wandb.log({"per iteration time": current_time -
-                              self.previous_time}, step=self.step)
-                    self.previous_time = current_time
+                barrier()
+                if self.is_main_process:
+                    current_time = time.time()
+                    if self.previous_time is None:
+                        self.previous_time = current_time
+                    else:
+                        wandb.log({"per iteration time": current_time -
+                                  self.previous_time}, step=self.step)
+                        self.previous_time = current_time
 
-            self.step += 1
+                self.step += 1
 
 
 def main():

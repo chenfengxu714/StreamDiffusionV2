@@ -7,10 +7,10 @@ from causvid.models import (
 )
 from causvid.loss import get_denoising_loss
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Tuple, Optional
 from torch import nn
 import torch
-
+from transformers import AutoModel
 
 class DMD(nn.Module):
     def __init__(self, args, device):
@@ -48,6 +48,22 @@ class DMD(nn.Module):
             self.generator.load_state_dict(
                 state_dict, strict=True
             )
+        
+        self.is_repa = args.is_repa
+        if self.is_repa:
+            self.repa_loss_weight = args.repa_loss_weight
+            self.generator.model.repa_layer = args.repa_layer-1 
+
+            model_name = "facebook/dinov2-large"
+            self.encoder = AutoModel.from_pretrained(model_name).to(device)
+            self.encoder.eval() 
+
+            self.repa_mlp = nn.Sequential(
+                nn.LayerNorm(1536),
+                nn.Linear(1536, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, 1024),
+            ).requires_grad_(True).to(device=device, dtype=torch.bfloat16)
 
         self.num_frame_per_block = getattr(args, "num_frame_per_block", 1)
 
@@ -367,14 +383,94 @@ class DMD(nn.Module):
         pred_image_or_video = pred_image_or_video.type_as(noisy_input)
 
         return pred_image_or_video, gradient_mask
+    
+    def _compute_repa_loss(self, pred_image_or_video: torch.Tensor, video_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the REPA loss using DINOv2 features.
+        """
+        assert self.is_repa, "REPA is not enabled"
+        assert self.generator.model.repa_layer != -1, "REPA layer is not set"
+        assert self.generator.model.repa_hidden_states is not None, "REPA hidden states are not available"
+        
+        # Get video parameters
+        assert video_tensor.shape[0] == 1, "Video tensor must have batch size 1"
+        video_tensor = video_tensor.squeeze(0)
+        C, T, H, W = video_tensor.shape
+        
+        # Calculate patch grids
+        original_patches_h, original_patches_w = H // 14, W // 14
+        target_patches_h, target_patches_w = H // 16, W // 16
+        
+        # Extract features using DINOv2
+        features = []
+        batch_size = 32
+        
+        for i in range(0, T, batch_size):
+            batch_frames = video_tensor[:, i:i + batch_size].permute(1, 0, 2, 3)  # [B, C, H, W]
+            
+            with torch.no_grad():
+                outputs = self.encoder(batch_frames)
+                batch_features = outputs.last_hidden_state[:, 1:, :]  # All patch tokens
+                features.append(batch_features)
+        
+        # Concatenate all features
+        features = torch.cat(features, dim=0)  # [T, num_patches, feature_dim]
+        
+        # Process features: first frame + average pooling every 4 frames
+        processed_features = [features[0:1]]  # Keep first frame
+        
+        remaining_frames = features[1:]
+        num_groups = (remaining_frames.shape[0] + 3) // 4
+        
+        for i in range(num_groups):
+            start_idx = i * 4
+            end_idx = min(start_idx + 4, remaining_frames.shape[0])
+            group_frames = remaining_frames[start_idx:end_idx]
+            avg_frame = group_frames.mean(dim=0, keepdim=True)
+            processed_features.append(avg_frame)
+        
+        processed_features = torch.cat(processed_features, dim=0)  # [T_processed, num_patches, feature_dim]
+        
+        # Reshape and downsample to target patch grid
+        T_processed, num_patches_raw, feature_dim = processed_features.shape
+        
+        # Reshape to spatial grid and downsample
+        features_spatial = processed_features.view(T_processed, original_patches_h, original_patches_w, feature_dim)
+        features_spatial = features_spatial.permute(0, 3, 1, 2)  # [T_processed, feature_dim, H//14, W//14]
+        
+        # Downsample to 16x16 patch grid
+        features_downsampled = torch.nn.functional.interpolate(
+            features_spatial, 
+            size=(target_patches_h, target_patches_w), 
+            mode='bilinear', 
+            align_corners=False
+        )
+        
+        # Final reshape
+        feature_tensor = features_downsampled.permute(0, 2, 3, 1).reshape(1, -1, feature_dim)
+        
+        # Process pred_image_or_video through repa_mlp
+        pred_features = self.repa_mlp(pred_image_or_video)  # [B, T_processed, num_patches, 1024]
+        
+        # Assert shapes match
+        assert pred_features.shape == feature_tensor.shape, f"Shape mismatch: pred_features {pred_features.shape} vs feature_tensor {feature_tensor.shape}"
+        
+        # Compute cosine similarity between corresponding tokens
+        cosine_sim = torch.nn.functional.cosine_similarity(pred_features, feature_tensor, dim=-1)  # [B, T_processed, num_patches]
+        
+        # Take average across all tokens
+        repa_loss = -cosine_sim.mean()  # Negative because we want to maximize similarity
+        
+        return repa_loss
+        
 
-    def generator_loss(self, image_or_video_shape, conditional_dict: dict, unconditional_dict: dict, clean_latent: torch.Tensor) -> Tuple[torch.Tensor, dict]:
+    def generator_loss(self, image_or_video_shape, conditional_dict: dict, unconditional_dict: dict, clean_latent: torch.Tensor, video_tensor: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, dict]:
         """
         Generate image/videos from noise and compute the DMD loss.
         The noisy input to the generator is backward simulated.
         This removes the need of any datasets during distillation.
         See Sec 4.5 of the DMD2 paper (https://arxiv.org/abs/2405.14867) for details.
-        Input:
+        Input:  
             - image_or_video_shape: a list containing the shape of the image or video [B, F, C, H, W].
             - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
             - unconditional_dict: a dictionary containing the unconditional information (e.g. null/negative text embeddings, null/negative image embeddings).
@@ -398,6 +494,9 @@ class DMD(nn.Module):
             unconditional_dict=unconditional_dict,
             gradient_mask=gradient_mask
         )
+        if self.is_repa:
+            repa_loss = self._compute_repa_loss(self.generator.model.repa_hidden_states, video_tensor)
+            dmd_loss += repa_loss * self.repa_loss_weight
 
         # Step 3: TODO: Implement the GAN loss
 
