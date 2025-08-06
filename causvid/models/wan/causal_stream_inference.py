@@ -59,6 +59,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             kv_cache1.append({
                 "k": torch.zeros([batch_size, self.kv_cache_length, 12, 128], dtype=dtype, device=device),
                 "v": torch.zeros([batch_size, self.kv_cache_length, 12, 128], dtype=dtype, device=device),
+                "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                "local_end_index": torch.tensor([0], dtype=torch.long, device=device)
             })
 
         self.kv_cache1 = kv_cache1  # always store the clean cache
@@ -73,7 +75,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             crossattn_cache.append({
                 "k": torch.zeros([batch_size, 512, 12, 128], dtype=dtype, device=device),
                 "v": torch.zeros([batch_size, 512, 12, 128], dtype=dtype, device=device),
-                "is_init": False
+                "is_init": False,
             })
 
         self.crossattn_cache = crossattn_cache  # always store the clean cache

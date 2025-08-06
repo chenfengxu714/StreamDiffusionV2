@@ -2,12 +2,12 @@ from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipe
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
 from omegaconf import OmegaConf
-from tqdm import tqdm
 import argparse
 import torch
 import os
 import time
 import numpy as np
+from depth_anything_v2.dpt import DepthAnythingV2
 
 import torchvision
 import torchvision.transforms.functional as TF
@@ -40,9 +40,9 @@ def load_mp4_as_tensor(
     video = rearrange(video, "t c h w -> c t h w")
     h, w = video.shape[-2:]
     aspect_ratio = h / w
-    assert 8 / 16 <= aspect_ratio <= 17 / 16, (
-        f"Unsupported aspect ratio: {aspect_ratio:.2f} for shape {video.shape}"
-    )
+    # assert 8 / 16 <= aspect_ratio <= 17 / 16, (
+    #     f"Unsupported aspect ratio: {aspect_ratio:.2f} for shape {video.shape}"
+    # )
     if resize_hw is not None:
         c, t, h0, w0 = video.shape
         video = torch.stack([
@@ -87,10 +87,10 @@ parser.add_argument("--checkpoint_folder", type=str)
 parser.add_argument("--output_folder", type=str)
 parser.add_argument("--prompt_file_path", type=str)
 parser.add_argument("--video_path", type=str)
-parser.add_argument("--noise_scale", type=float, default=0.8)
+parser.add_argument("--noise_scale", type=float, default=0.700)
 parser.add_argument("--height", type=int, default=480)
 parser.add_argument("--width", type=int, default=832)
-parser.add_argument("--fps", type=int, default=16)
+parser.add_argument("--fps", type=int, default=30)
 parser.add_argument("--unfold", action="store_true", default=False)
 
 args = parser.parse_args()
@@ -111,10 +111,23 @@ pipeline.generator.load_state_dict(
     state_dict, strict=True
 )
 
+# model_configs = {
+#     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+#     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+#     'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+#     'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+# }
+
+# depth_anything = DepthAnythingV2(**model_configs["vitl"])
+# depth_anything.load_state_dict(torch.load(f'ckpts/depth_anything_v2_vitl.pth', map_location='cpu'))
+# depth_anything = depth_anything.to(device="cuda", dtype=torch.bfloat16).eval()
+
 input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0) # [1, C, T, H, W]
 input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device="cuda")
+
 if args.unfold:
     input_video_original = unfold_2x2_spatial(input_video_original)
+print(input_video_original.shape)
 
 # chunck_size=(pipeline.num_frame_per_block-1)*4+1
 chunck_size = 4
@@ -147,6 +160,7 @@ for i in range(num_chuncks):
         current_end = current_end+(chunck_size//4)*pipeline.frame_seq_length
 
     input_video = input_video_original[:,:,start_idx:end_idx]
+    # enhance_scale = depth_anything.infer_video(input_video)
     
     latents = pipeline.vae.model.stream_encode(input_video)
 
@@ -156,13 +170,16 @@ for i in range(num_chuncks):
         pipeline.prepare(noise=latents, text_prompts=prompts)
 
     noise = torch.randn_like(latents)
-    latents = noise*noise_scale + latents*(1-noise_scale)
+    noisy_latents = noise*noise_scale + latents*(1-noise_scale)
 
-    video = pipeline.inference(
-        noise=latents,
+    denoised_pred = pipeline.inference(
+        noise=noisy_latents, # [1, 4, 16, 16, 60]
         current_start=current_start,
         current_end=current_end,
     )
+
+    video = pipeline.vae.stream_decode_to_pixel(denoised_pred)
+    video = (video * 0.5 + 0.5).clamp(0, 1)
 
     if args.unfold:
         video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)

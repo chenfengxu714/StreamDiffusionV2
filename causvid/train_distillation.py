@@ -163,7 +163,10 @@ class Trainer:
             text_prompts = batch["prompts"]
             clean_latent = batch["ode_latent"][:, -1].to(
                 device=self.device, dtype=self.dtype)
-            video_tensor = batch["video_tensor"].to(device=self.device, dtype=self.dtype)
+            if self.config.is_repa:
+                video_tensor = batch["video_tensor"].to(device=self.device, dtype=self.dtype)
+            else:
+                video_tensor = None
         else:
             text_prompts = next(self.dataloader)
             clean_latent = None

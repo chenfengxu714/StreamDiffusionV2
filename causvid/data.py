@@ -119,10 +119,13 @@ class ODERegressionLMDBDataset(Dataset):
         )
         if self.load_video:
             video_tensor = load_mp4_as_tensor(f"mixkit_videos/{prompts[:100]}.mp4")
+            return {
+                "prompts": prompts,
+                "ode_latent": torch.tensor(latents, dtype=torch.float32),
+                "video_tensor": video_tensor
+            }
         else:
-            video_tensor = None
-        return {
-            "prompts": prompts,
-            "ode_latent": torch.tensor(latents, dtype=torch.float32),
-            "video_tensor": video_tensor
-        }
+            return {
+                "prompts": prompts,
+                "ode_latent": torch.tensor(latents, dtype=torch.float32),
+            }
