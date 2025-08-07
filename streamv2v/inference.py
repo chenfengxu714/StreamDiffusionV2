@@ -147,6 +147,7 @@ num_steps = len(config.denoising_step_list)
 torch.cuda.synchronize()
 start_time = time.time()
 
+denoised_pred_list = []
 for i in range(num_chuncks):
 
     if i==0:
@@ -173,24 +174,40 @@ for i in range(num_chuncks):
     noise = torch.randn_like(latents)
     noisy_latents = noise*noise_scale + latents*(1-noise_scale)
 
-    # Separately denoise the first snippet
     if i==0:
-        for j in range(num_steps):
-            denoised_pred = pipeline.inference(
+        # Split the first chunk into two parts
+        denoised_pred_list.append(
+            pipeline.inference(
+                noise=noisy_latents[:, [0], :, :, :],
+                current_start=current_start,
+                current_end=pipeline.frame_seq_length,
+            )
+        )
+        denoised_pred_list.append(
+            pipeline.inference(
+                noise=noisy_latents[:, [1], :, :, :],
+                current_start=pipeline.frame_seq_length,
+                current_end=current_end,
+            )
+        )
+    else:
+        denoised_pred_list.append(
+            pipeline.inference(
                 noise=noisy_latents,
                 current_start=current_start,
                 current_end=current_end,
             )
-    else:
-        denoised_pred = pipeline.inference(
-            noise=noisy_latents,
-            current_start=current_start,
-            current_end=current_end,
         )
 
     # The first few steps do not return meaningful results
-    if 0 < i < num_steps:
+    if i < num_steps - 2:
         continue
+    # The latest two outputs are the results of the first chunk, concatenate them
+    if i == num_steps - 2:
+        denoised_pred = torch.cat(denoised_pred_list[-2:], dim=1)
+    else:
+        denoised_pred = denoised_pred_list[-1]
+    denoised_pred_list = []
 
     video = pipeline.vae.stream_decode_to_pixel(denoised_pred)
     video = (video * 0.5 + 0.5).clamp(0, 1)
@@ -199,12 +216,12 @@ for i in range(num_chuncks):
         video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
     video = video[0].permute(0, 2, 3, 1).cpu().numpy()
 
-    if i==0:
+    if len(video_list) == 0:
         video_list.append(video)
     else:
         video_list.append(video[overlap:])
 
-for i in range(num_steps - 1):
+for i in range(num_steps - 2):
     denoised_pred = pipeline.inference(
         noise=torch.zeros_like(noisy_latents),
         current_start=current_start,
@@ -217,7 +234,7 @@ for i in range(num_steps - 1):
         video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
     video = video[0].permute(0, 2, 3, 1).cpu().numpy()
 
-    if i==0:
+    if len(video_list) == 0:
         video_list.append(video)
     else:
         video_list.append(video[overlap:])

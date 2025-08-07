@@ -165,4 +165,5 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                             dtype=torch.long)
             )
 
-        return self.hidden_states[[-1]]
+        # The last row is only for updating kv cache, so we return the second last row
+        return self.hidden_states[[-2]]
