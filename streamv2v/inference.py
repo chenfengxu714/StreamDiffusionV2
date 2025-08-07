@@ -127,7 +127,7 @@ input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device="
 
 if args.unfold:
     input_video_original = unfold_2x2_spatial(input_video_original)
-print(input_video_original.shape)
+print("input_video_original.shape", input_video_original.shape)
 
 # chunck_size=(pipeline.num_frame_per_block-1)*4+1
 chunck_size = 4
@@ -142,6 +142,7 @@ prompts = [dataset[0]]
 video_list = []
 cost_time = 0
 noise_scale = args.noise_scale
+num_steps = len(config.denoising_step_list)
 
 torch.cuda.synchronize()
 start_time = time.time()
@@ -167,17 +168,48 @@ for i in range(num_chuncks):
     latents = latents.transpose(2,1)
     
     if i==0:
-        pipeline.prepare(noise=latents, text_prompts=prompts)
+        pipeline.prepare(batch_size=num_steps, text_prompts=prompts, device="cuda", dtype=torch.bfloat16)
 
     noise = torch.randn_like(latents)
     noisy_latents = noise*noise_scale + latents*(1-noise_scale)
 
+    # Separately denoise the first snippet
+    if i==0:
+        for j in range(num_steps):
+            denoised_pred = pipeline.inference(
+                noise=noisy_latents,
+                current_start=current_start,
+                current_end=current_end,
+            )
+    else:
+        denoised_pred = pipeline.inference(
+            noise=noisy_latents,
+            current_start=current_start,
+            current_end=current_end,
+        )
+
+    # The first few steps do not return meaningful results
+    if 0 < i < num_steps:
+        continue
+
+    video = pipeline.vae.stream_decode_to_pixel(denoised_pred)
+    video = (video * 0.5 + 0.5).clamp(0, 1)
+
+    if args.unfold:
+        video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
+    video = video[0].permute(0, 2, 3, 1).cpu().numpy()
+
+    if i==0:
+        video_list.append(video)
+    else:
+        video_list.append(video[overlap:])
+
+for i in range(num_steps - 1):
     denoised_pred = pipeline.inference(
-        noise=noisy_latents, # [1, 4, 16, 16, 60]
+        noise=torch.zeros_like(noisy_latents),
         current_start=current_start,
         current_end=current_end,
     )
-
     video = pipeline.vae.stream_decode_to_pixel(denoised_pred)
     video = (video * 0.5 + 0.5).clamp(0, 1)
 

@@ -36,12 +36,13 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
         seq_len = f * h * w
 
+        sf = start_frame[i].item() if isinstance(start_frame, torch.Tensor) else start_frame
+
         # precompute multipliers
         x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
             seq_len, n, -1, 2))
         freqs_i = torch.cat([
-            freqs[0][start_frame:start_frame +
-                     f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs[0][sf:sf + f].view(f, 1, 1, -1).expand(f, h, w, -1),
             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
         ],
@@ -141,44 +142,97 @@ class CausalWanSelfAttention(nn.Module):
             roped_key = causal_rope_apply(
                 k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
 
-            current_end = current_start + roped_query.shape[1]
-            sink_tokens = self.sink_size * frame_seqlen
-            # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
-            kv_cache_size = kv_cache["k"].shape[1]
-            num_new_tokens = roped_query.shape[1]
-            if (current_end > kv_cache["global_end_index"].item()) and (
-                    num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
-                # Calculate the number of new tokens added in this step
-                # Shift existing cache content left to discard oldest tokens
-                # Clone the source slice to avoid overlapping memory error
-                num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
-                num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
-                kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                    kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                    kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                # Insert the new keys/values at the end
-                local_end_index = kv_cache["local_end_index"].item() + current_end - \
-                    kv_cache["global_end_index"].item() - num_evicted_tokens
-                local_start_index = local_end_index - num_new_tokens
-                kv_cache["k"][:, local_start_index:local_end_index] = roped_key
-                kv_cache["v"][:, local_start_index:local_end_index] = v
+            if isinstance(current_start, int) or len(current_start) == 1:
+                current_end = current_start + roped_query.shape[1]
+                sink_tokens = self.sink_size * frame_seqlen
+                # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
+                kv_cache_size = kv_cache["k"].shape[1]
+                num_new_tokens = roped_query.shape[1]
+                if (current_end > kv_cache["global_end_index"].item()) and (
+                        num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
+                    # Calculate the number of new tokens added in this step
+                    # Shift existing cache content left to discard oldest tokens
+                    # Clone the source slice to avoid overlapping memory error
+                    num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
+                    num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
+                    kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                        kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                    kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                        kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                    # Insert the new keys/values at the end
+                    local_end_index = kv_cache["local_end_index"].item() + current_end - \
+                        kv_cache["global_end_index"].item() - num_evicted_tokens
+                    local_start_index = local_end_index - num_new_tokens
+                    kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+                    kv_cache["v"][:, local_start_index:local_end_index] = v
+
+                else:
+                    # Assign new keys/values directly up to current_end
+                    local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
+                    local_start_index = local_end_index - num_new_tokens
+                    kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+                    kv_cache["v"][:, local_start_index:local_end_index] = v
+
+                x = attention(
+                    roped_query,
+                    kv_cache["k"][:, :local_end_index],
+                    kv_cache["v"][:, :local_end_index]
+                )
+
+                kv_cache["global_end_index"].fill_(current_end)
+                kv_cache["local_end_index"].fill_(local_end_index)
 
             else:
-                # Assign new keys/values directly up to current_end
-                local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
-                local_start_index = local_end_index - num_new_tokens
-                kv_cache["k"][:, local_start_index:local_end_index] = roped_key
-                kv_cache["v"][:, local_start_index:local_end_index] = v
+                output_x = []
+                for i, c_start in enumerate(current_start):
+                    current_end = c_start + roped_query.shape[1]
+                    sink_tokens = self.sink_size * frame_seqlen
+                    # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
+                    kv_cache_size = kv_cache["k"].shape[1]
+                    num_new_tokens = roped_query.shape[1]
+                    if (current_end > kv_cache["global_end_index"].item()) and (
+                            num_new_tokens + kv_cache["local_end_index"][i].item() > kv_cache_size):
+                        # Calculate the number of new tokens added in this step
+                        # Shift existing cache content left to discard oldest tokens
+                        # Clone the source slice to avoid overlapping memory error
+                        num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
+                        num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
+                        kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                            kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                        kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                            kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                        # Insert the new keys/values at the end
+                        end_index = kv_cache["local_end_index"].item() + current_end - \
+                            kv_cache["global_end_index"].item() - num_evicted_tokens
+                        kv_cache["local_end_index"].fill_(end_index)
+                    else:
+                        end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
+                        if current_end > kv_cache["global_end_index"].item():
+                            kv_cache["local_end_index"].fill_(end_index)
 
-            x = attention(
-                roped_query,
-                kv_cache["k"][:, :local_end_index],
-                kv_cache["v"][:, :local_end_index]
-            )
-            
-            kv_cache["global_end_index"].fill_(current_end)
-            kv_cache["local_end_index"].fill_(local_end_index)
+                    start_index = end_index - num_new_tokens
+                    if start_index >= 0 or end_index <= 0:
+                        # Normal case — no wrap
+                        kv_cache["k"][:, start_index:end_index] = roped_key[[i]]
+                        kv_cache["v"][:, start_index:end_index] = v[[i]]
+                    else:
+                        # Wraparound case — split update
+                        # e.g., start_index = -2, end_index = 2
+                        num_neg = -start_index  # how many tokens go to the end
+                        kv_cache["k"][:, start_index:] = roped_key[[i], :num_neg]
+                        kv_cache["k"][:, :end_index]   = roped_key[[i], num_neg:]
+                        kv_cache["v"][:, start_index:] = v[[i], :num_neg]
+                        kv_cache["v"][:, :end_index]   = v[[i], num_neg:]
+
+                    output_x.append(attention(
+                        roped_query[[i]],
+                        kv_cache["k"][:, :end_index],
+                        kv_cache["v"][:, :end_index]
+                    ))
+
+                    kv_cache["global_end_index"].fill_(max(kv_cache["global_end_index"].item(), current_end))
+
+                x = torch.cat(output_x, dim=0)
 
         # output
         x = x.flatten(2)

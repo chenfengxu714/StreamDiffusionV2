@@ -80,11 +80,28 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         self.crossattn_cache = crossattn_cache  # always store the clean cache
     
-    def prepare(self, noise: torch.Tensor, text_prompts: List[str]):
-        batch_size = noise.shape[0]
+    def prepare(
+        self,
+        batch_size: int,
+        text_prompts: List[str],
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        self.batch_size = batch_size
+        self.hidden_states = None
+        self.kv_cache_starts = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self.kv_cache_ends = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self.device = device
+
+        self.timestep = torch.cat((
+            self.denoising_step_list,
+            torch.tensor([0], dtype=torch.int64, device=device)
+        ))
+
         self.conditional_dict = self.text_encoder(
             text_prompts=text_prompts
         )
+
         if batch_size > 1:
             self.conditional_dict['prompt_embeds'] = self.conditional_dict['prompt_embeds'].repeat(batch_size, 1, 1)
 
@@ -92,14 +109,14 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         if self.kv_cache1 is None:
             self._initialize_kv_cache(
                 batch_size=batch_size,
-                dtype=noise.dtype,
-                device=noise.device
+                dtype=dtype,
+                device=device
             )
 
             self._initialize_crossattn_cache(
                 batch_size=batch_size,
-                dtype=noise.dtype,
-                device=noise.device
+                dtype=dtype,
+                device=device
             )
         else:
             # reset cross attn cache
@@ -108,56 +125,44 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
 
     def inference(self, noise: torch.Tensor, current_start: int, current_end: int) -> torch.Tensor:
-        batch_size = noise.shape[0]
+        if self.hidden_states is None or self.hidden_states.shape[1] != noise.shape[1]:
+            self.hidden_states = torch.zeros(
+                (self.batch_size, *noise.shape[1:]), dtype=noise.dtype, device=noise.device
+            )
+        self.hidden_states = torch.cat((noise, self.hidden_states), dim=0)
+        self.hidden_states = self.hidden_states[:self.batch_size]
+        self.kv_cache_starts = torch.cat(
+            (
+                torch.tensor([current_start], dtype=torch.long, device=self.device),
+                self.kv_cache_starts,
+            ),
+            dim=0)
+        self.kv_cache_starts = self.kv_cache_starts[:self.batch_size]
+        self.kv_cache_ends = torch.cat(
+            (
+                torch.tensor([current_end], dtype=torch.long, device=self.device),
+                self.kv_cache_ends,
+            ),
+            dim=0)
+        self.kv_cache_ends = self.kv_cache_ends[:self.batch_size]
 
-        # Step 2.1: Spatial denoising loop
-        for index, current_timestep in enumerate(self.denoising_step_list):
-            # set current timestep
-            timestep = torch.ones(
-                [batch_size, noise.shape[1]], device=noise.device, dtype=torch.int64) * current_timestep
-
-            if index < len(self.denoising_step_list) - 1:
-                denoised_pred = self.generator(
-                    noisy_image_or_video=noise,
-                    conditional_dict=self.conditional_dict,
-                    timestep=timestep,
-                    kv_cache=self.kv_cache1,
-                    crossattn_cache=self.crossattn_cache,
-                    current_start=current_start,
-                    current_end=current_end
-                )
-                next_timestep = self.denoising_step_list[index + 1]
-                noise = self.scheduler.add_noise(
-                    denoised_pred.flatten(0, 1),
-                    torch.randn_like(denoised_pred.flatten(0, 1)),
-                    next_timestep *
-                    torch.ones([batch_size], device="cuda",
-                                dtype=torch.long)
-                ).unflatten(0, denoised_pred.shape[:2])
-            else:
-                # for getting real output
-                denoised_pred = self.generator(
-                    noisy_image_or_video=noise,
-                    conditional_dict=self.conditional_dict,
-                    timestep=timestep,
-                    kv_cache=self.kv_cache1,
-                    crossattn_cache=self.crossattn_cache,
-                    current_start=current_start,
-                    current_end=current_end
-                )
-
-        self.generator(
-            noisy_image_or_video=denoised_pred,
+        self.hidden_states = self.generator(
+            noisy_image_or_video=self.hidden_states,
             conditional_dict=self.conditional_dict,
-            timestep=timestep * 0,
+            timestep=self.timestep.unsqueeze(1).expand(-1, self.hidden_states.shape[1]),
             kv_cache=self.kv_cache1,
             crossattn_cache=self.crossattn_cache,
-            current_start=current_start,
-            current_end=current_end
+            current_start=self.kv_cache_starts,
+            current_end=self.kv_cache_ends
         )
 
-        # Step 3: Decode the output
-        # video = self.vae.stream_decode_to_pixel(denoised_pred)    
-        # video = (video * 0.5 + 0.5).clamp(0, 1)
+        for i in range(len(self.denoising_step_list) - 1):
+            self.hidden_states[[i]] = self.scheduler.add_noise(
+                self.hidden_states[[i]],
+                torch.randn_like(self.hidden_states[[i]]),
+                self.denoising_step_list[i + 1] *
+                torch.ones([1], device="cuda",
+                            dtype=torch.long)
+            )
 
-        return denoised_pred
+        return self.hidden_states[[-1]]
