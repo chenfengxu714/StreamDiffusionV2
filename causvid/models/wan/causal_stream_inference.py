@@ -59,8 +59,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             kv_cache1.append({
                 "k": torch.zeros([batch_size, self.kv_cache_length, 12, 128], dtype=dtype, device=device),
                 "v": torch.zeros([batch_size, self.kv_cache_length, 12, 128], dtype=dtype, device=device),
-                "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                "local_end_index": torch.tensor([0], dtype=torch.long, device=device)
+                "global_end_index": torch.zeros([batch_size], dtype=torch.long, device=device),
+                "local_end_index": torch.zeros([batch_size], dtype=torch.long, device=device)
             })
 
         self.kv_cache1 = kv_cache1  # always store the clean cache
@@ -129,22 +129,33 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.hidden_states = torch.zeros(
                 (self.batch_size, *noise.shape[1:]), dtype=noise.dtype, device=noise.device
             )
-        self.hidden_states = torch.cat((noise, self.hidden_states), dim=0)
-        self.hidden_states = self.hidden_states[:self.batch_size]
-        self.kv_cache_starts = torch.cat(
-            (
-                torch.tensor([current_start], dtype=torch.long, device=self.device),
-                self.kv_cache_starts,
-            ),
-            dim=0)
-        self.kv_cache_starts = self.kv_cache_starts[:self.batch_size]
-        self.kv_cache_ends = torch.cat(
-            (
-                torch.tensor([current_end], dtype=torch.long, device=self.device),
-                self.kv_cache_ends,
-            ),
-            dim=0)
-        self.kv_cache_ends = self.kv_cache_ends[:self.batch_size]
+        self.hidden_states = self.roll_states(noise, self.hidden_states)
+        self.kv_cache_starts = self.roll_states(
+            torch.tensor([current_start], dtype=torch.long, device=self.device),
+            self.kv_cache_starts
+        )
+        self.kv_cache_ends = self.roll_states(
+            torch.tensor([current_end], dtype=torch.long, device=self.device),
+            self.kv_cache_ends
+        )
+
+        for block_index in range(self.num_transformer_blocks):
+            self.kv_cache1[block_index]["k"] = self.roll_states(
+                self.kv_cache1[block_index]["k"][[0]].clone(),
+                self.kv_cache1[block_index]["k"]
+            )
+            self.kv_cache1[block_index]["v"] = self.roll_states(
+                self.kv_cache1[block_index]["v"][[0]].clone(),
+                self.kv_cache1[block_index]["v"]
+            )
+            self.kv_cache1[block_index]["global_end_index"] = self.roll_states(
+                self.kv_cache1[block_index]["global_end_index"][[0]].clone(),
+                self.kv_cache1[block_index]["global_end_index"]
+            )
+            self.kv_cache1[block_index]["local_end_index"] = self.roll_states(
+                self.kv_cache1[block_index]["local_end_index"][[0]].clone(),
+                self.kv_cache1[block_index]["local_end_index"]
+            )
 
         self.hidden_states = self.generator(
             noisy_image_or_video=self.hidden_states,
@@ -160,10 +171,12 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.hidden_states[[i]] = self.scheduler.add_noise(
                 self.hidden_states[[i]],
                 torch.randn_like(self.hidden_states[[i]]),
-                self.denoising_step_list[i + 1] *
-                torch.ones([1], device="cuda",
-                            dtype=torch.long)
+                self.denoising_step_list[i + 1] * torch.ones([1], device="cuda", dtype=torch.long)
             )
 
         # The last row is only for updating kv cache, so we return the second last row
         return self.hidden_states[[-2]]
+
+    def roll_states(self, new_state: torch.Tensor, states: torch.Tensor) -> torch.Tensor:
+        states = states[:self.batch_size - 1]
+        return torch.cat((new_state, states), dim=0)

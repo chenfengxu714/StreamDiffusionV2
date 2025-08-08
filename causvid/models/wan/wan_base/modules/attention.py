@@ -142,6 +142,7 @@ def attention(
     deterministic=False,
     dtype=torch.bfloat16,
     fa_version=None,
+    attn_mask=None,
 ):
     if FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE:
         return flash_attention(
@@ -164,7 +165,6 @@ def attention(
             warnings.warn(
                 'Padding mask is disabled when using scaled_dot_product_attention. It can have a significant impact on performance.'
             )
-        attn_mask = None
 
         q = q.transpose(1, 2).to(dtype)
         k = k.transpose(1, 2).to(dtype)
