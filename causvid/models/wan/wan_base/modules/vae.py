@@ -1,6 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import logging
-
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
@@ -98,6 +97,9 @@ class Resample(nn.Module):
         else:
             self.resample = nn.Identity()
 
+        self._cache_buffer = None
+        self._cache_buffer_shape = None
+
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         b, c, t, h, w = x.size()
         if self.mode == 'upsample3d':
@@ -108,22 +110,28 @@ class Resample(nn.Module):
                     feat_idx[0] += 1
                 else:
 
-                    cache_x = x[:, :, -CACHE_T:, :, :].clone()
-                    if cache_x.shape[2] < 2 and feat_cache[
-                            idx] is not None and feat_cache[idx] != 'Rep':
-                        # cache last frame of last two chunk
-                        cache_x = torch.cat([
-                            feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
-                                cache_x.device), cache_x
-                        ],
-                            dim=2)
-                    if cache_x.shape[2] < 2 and feat_cache[
-                            idx] is not None and feat_cache[idx] == 'Rep':
-                        cache_x = torch.cat([
-                            torch.zeros_like(cache_x).to(cache_x.device),
-                            cache_x
-                        ],
-                            dim=2)
+                    cache_x = self._ensure_cache_buffer(x, device=x.device, dtype=x.dtype)
+                    cache_x.copy_(x[:, :, -CACHE_T:, :, :])
+                    if cache_x.shape[2] < 2 and feat_cache[idx] is not None and feat_cache[idx] != 'Rep':
+                        new_cache = torch.empty(
+                            (cache_x.size(0), cache_x.size(1), cache_x.size(2) + 1, cache_x.size(3), cache_x.size(4)),
+                            device=cache_x.device,
+                            dtype=cache_x.dtype
+                        )
+                        new_cache[:, :, 0:1, :, :].copy_(feat_cache[idx][:, :, -1:, :, :].to(cache_x.device))
+                        new_cache[:, :, 1:, :, :].copy_(cache_x)
+                        cache_x = new_cache
+
+                    if cache_x.shape[2] < 2 and feat_cache[idx] is not None and feat_cache[idx] == 'Rep':
+                        new_cache = torch.empty(
+                            (cache_x.size(0), cache_x.size(1), cache_x.size(2) + 1, cache_x.size(3), cache_x.size(4)),
+                            device=cache_x.device,
+                            dtype=cache_x.dtype
+                        )
+                        new_cache[:, :, 0:1, :, :].copy_(torch.zeros_like(cache_x))
+                        new_cache[:, :, 1:, :, :].copy_(cache_x)
+                        cache_x = new_cache
+
                     if feat_cache[idx] == 'Rep':
                         x = self.time_conv(x)
                     else:
@@ -148,7 +156,8 @@ class Resample(nn.Module):
                     feat_idx[0] += 1
                 else:
 
-                    cache_x = x[:, :, -1:, :, :].clone()
+                    cache_x = self._ensure_cache_buffer(x, device=x.device, dtype=x.dtype)
+                    cache_x.copy_(x[:, :, -CACHE_T:, :, :])
                     # if cache_x.shape[2] < 2 and feat_cache[idx] is not None and feat_cache[idx]!='Rep':
                     #     # cache last frame of last two chunk
                     #     cache_x = torch.cat([feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x], dim=2)
@@ -182,6 +191,16 @@ class Resample(nn.Module):
         conv.weight.data.copy_(conv_weight)
         nn.init.zeros_(conv.bias.data)
 
+    def _ensure_cache_buffer(self, x, device=None, dtype=None):
+        # buffer shape: (B, C, CACHE_T, H, W)
+        B, C, T, H, W = x.shape
+        target_shape = (B, C, CACHE_T, H, W)
+        if self._cache_buffer_shape != target_shape:
+            # allocate new buffer
+            self._cache_buffer = x.new_empty(target_shape)
+            self._cache_buffer_shape = target_shape
+        return self._cache_buffer
+
 
 class ResidualBlock(nn.Module):
 
@@ -199,25 +218,48 @@ class ResidualBlock(nn.Module):
         self.shortcut = CausalConv3d(in_dim, out_dim, 1) \
             if in_dim != out_dim else nn.Identity()
 
+        # small reusable buffer to store cached frames (avoid repeated allocations)
+        self._cache_buffer = None
+        self._cache_buffer_shape = None
+
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         h = self.shortcut(x)
         for layer in self.residual:
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
                 idx = feat_idx[0]
-                cache_x = x[:, :, -CACHE_T:, :, :].clone()
+
+                cache_x = self._ensure_cache_buffer(x, device=x.device, dtype=x.dtype)
+                cache_x.copy_(x[:, :, -CACHE_T:, :, :])
+
                 if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                    # cache last frame of last two chunk
-                    cache_x = torch.cat([
-                        feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(
-                            cache_x.device), cache_x
-                    ],
-                        dim=2)
+                    tmp = torch.empty(
+                        (cache_x.size(0), cache_x.size(1), cache_x.size(2) + 1, cache_x.size(3), cache_x.size(4)),
+                        device=x.device,
+                        dtype=x.dtype
+                    )
+                    tmp[:, :, 0:1, :, :].copy_(
+                        feat_cache[idx][:, :, -1:, :, :].to(x.device)
+                    )
+                    tmp[:, :, 1:, :, :].copy_(cache_x)
+                    cache_x = tmp
+
                 x = layer(x, feat_cache[idx])
                 feat_cache[idx] = cache_x
                 feat_idx[0] += 1
             else:
                 x = layer(x)
         return x + h
+
+
+    def _ensure_cache_buffer(self, x, device=None, dtype=None):
+        # buffer shape: (B, C, CACHE_T, H, W)
+        B, C, T, H, W = x.shape
+        target_shape = (B, C, CACHE_T, H, W)
+        if self._cache_buffer_shape != target_shape:
+            # allocate new buffer
+            self._cache_buffer = x.new_empty(target_shape)
+            self._cache_buffer_shape = target_shape
+        return self._cache_buffer
 
 
 class AttentionBlock(nn.Module):

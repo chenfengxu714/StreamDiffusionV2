@@ -1,4 +1,4 @@
-from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
+from causvid.models.wan.causal_stream_inference_onestep import CausalStreamInferencePipeline
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
 from omegaconf import OmegaConf
@@ -161,7 +161,7 @@ for i in range(num_chuncks):
     latents = latents.transpose(2,1)
     
     if i==0:
-        pipeline.prepare(noise=latents, text_prompts=prompts)
+        pipeline.prepare(latents, text_prompts=prompts)
 
     noise = torch.randn_like(latents)
     noisy_latents = noise*noise_scale + latents*(1-noise_scale)
