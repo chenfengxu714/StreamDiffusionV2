@@ -7,7 +7,6 @@ import torch
 import os
 import time
 import numpy as np
-from depth_anything_v2.dpt import DepthAnythingV2
 
 import torchvision
 import torchvision.transforms.functional as TF
