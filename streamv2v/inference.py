@@ -7,6 +7,7 @@ import torch
 import os
 import time
 import numpy as np
+from depth_anything_v2.dpt import DepthAnythingV2
 
 import torchvision
 import torchvision.transforms.functional as TF
@@ -90,7 +91,6 @@ parser.add_argument("--noise_scale", type=float, default=0.700)
 parser.add_argument("--height", type=int, default=480)
 parser.add_argument("--width", type=int, default=832)
 parser.add_argument("--fps", type=int, default=30)
-parser.add_argument("--unfold", action="store_true", default=False)
 
 args = parser.parse_args()
 
@@ -110,23 +110,8 @@ pipeline.generator.load_state_dict(
     state_dict, strict=True
 )
 
-# model_configs = {
-#     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-#     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-#     'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-#     'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
-# }
-
-# depth_anything = DepthAnythingV2(**model_configs["vitl"])
-# depth_anything.load_state_dict(torch.load(f'ckpts/depth_anything_v2_vitl.pth', map_location='cpu'))
-# depth_anything = depth_anything.to(device="cuda", dtype=torch.bfloat16).eval()
-
 input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0) # [1, C, T, H, W]
 input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device="cuda")
-
-if args.unfold:
-    input_video_original = unfold_2x2_spatial(input_video_original)
-print("input_video_original.shape", input_video_original.shape)
 
 # chunck_size=(pipeline.num_frame_per_block-1)*4+1
 chunck_size = 4
@@ -211,8 +196,6 @@ for i in range(num_chuncks):
     video = pipeline.vae.stream_decode_to_pixel(denoised_pred)
     video = (video * 0.5 + 0.5).clamp(0, 1)
 
-    if args.unfold:
-        video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
     video = video[0].permute(0, 2, 3, 1).cpu().numpy()
 
     if len(video_list) == 0:
@@ -229,8 +212,6 @@ for i in range(num_steps - 2):
     video = pipeline.vae.stream_decode_to_pixel(denoised_pred)
     video = (video * 0.5 + 0.5).clamp(0, 1)
 
-    if args.unfold:
-        video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
     video = video[0].permute(0, 2, 3, 1).cpu().numpy()
 
     if len(video_list) == 0:

@@ -5,10 +5,16 @@ from causvid.models import (
 )
 from typing import List, Optional
 import torch
+import torch.distributed as dist
+import types
+from functools import partial
+from causvid.models.wan.wan_base.distributed.fsdp import shard_model
 
 class CausalStreamInferencePipeline(torch.nn.Module):
     def __init__(self, args, device):
         super().__init__()
+        self.device = device
+        shard_fn = partial(shard_model, device_id=device)
         # Step 1: Initialize all models
         self.generator_model_name = getattr(
             args, "generator_name", args.model_name)
@@ -33,6 +39,10 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.num_transformer_blocks = 30
         scale_size = 16
         self.frame_seq_length = (args.height//scale_size) * (args.width//scale_size)
+        self.fold=False
+        if args.fold:
+            self.frame_seq_length = self.frame_seq_length//4
+            self.fold=True
         self.kv_cache_length = self.frame_seq_length*args.num_kv_cache
         self.conditional_dict = None
 
@@ -47,16 +57,68 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         if self.num_frame_per_block > 1:
             self.generator.model.num_frame_per_block = self.num_frame_per_block
 
+        if args.ulysses_size > 1 or args.ring_size > 1:
+            from xfuser.core.distributed import get_sequence_parallel_world_size, get_sp_group
+
+            from causvid.models.wan.wan_base.distributed.xdit_context_parallel import (
+                usp_attn_forward,
+                usp_dit_forward,
+            )
+            for block in self.generator.model.blocks:
+                block.self_attn.forward = types.MethodType(
+                    usp_attn_forward, block.self_attn)
+            self.generator.model.forward = types.MethodType(usp_dit_forward, self.generator.model)
+            self.sp_size = get_sequence_parallel_world_size()
+            
+            # Get sequence parallel process group for FSDP
+            self.sp_group = get_sp_group().device_group
+        else:
+            self.sp_size = 1
+            self.sp_group = None
+
+        if dist.is_initialized():
+            dist.barrier()
+        if args.ulysses_size > 1 or args.ring_size > 1:
+            # Use sequence parallel process group for FSDP sharding
+            self.generator.model = shard_fn(
+                self.generator.model, 
+                process_group=self.sp_group
+            )
+        else:
+            self.generator.model.to(self.device)
+
     def _initialize_kv_cache(self, batch_size, dtype, device):
         """
         Initialize a Per-GPU KV cache for the Wan model.
         """
         kv_cache1 = []
-
-        for _ in range(self.num_transformer_blocks):
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        
+        # Get sequence parallel info
+        if hasattr(self, 'sp_size') and self.sp_size > 1:
+            from xfuser.core.distributed import get_sequence_parallel_rank
+            sp_rank = get_sequence_parallel_rank()
+        else:
+            sp_rank = 0
+            
+        for i in range(self.num_transformer_blocks):
+            # Adjust cache size based on sequence parallel rank
+            if self.sp_size > 1:
+                # In sequence parallel, each rank handles partial sequence
+                cache_length = self.kv_cache_length // self.sp_size
+                if sp_rank == self.sp_size - 1:  # Last rank handles remainder
+                    cache_length += self.kv_cache_length % self.sp_size
+            else:
+                cache_length = self.kv_cache_length
+                
+            # Handle fold case
+            if world_size > 1 and rank==0 and i == self.num_transformer_blocks - 1 and self.fold:
+                cache_length *= 4
+                
             kv_cache1.append({
-                "k": torch.zeros([batch_size, self.kv_cache_length, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, self.kv_cache_length, 12, 128], dtype=dtype, device=device),
+                "k": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
                 "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
                 "local_end_index": torch.tensor([0], dtype=torch.long, device=device)
             })
@@ -78,8 +140,16 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         self.crossattn_cache = crossattn_cache  # always store the clean cache
     
-    def prepare(self, noise: torch.Tensor, text_prompts: List[str]):
+    def prepare(self, noise: torch.Tensor=None, text_prompts: List[str]=None, batch_size: int=None):
         batch_size = noise.shape[0]
+        
+        # Check sequence parallel status
+        if hasattr(self, 'sp_size') and self.sp_size > 1:
+            from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size
+            sp_rank = get_sequence_parallel_rank()
+            sp_size = get_sequence_parallel_world_size()
+            print(f"Sequence parallel: rank {sp_rank}/{sp_size}")
+            
         self.conditional_dict = self.text_encoder(
             text_prompts=text_prompts
         )
@@ -103,10 +173,17 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             # reset cross attn cache
             for block_index in range(self.num_transformer_blocks):
                 self.crossattn_cache[block_index]["is_init"] = False
-
+                
 
     def inference(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
         batch_size = noise.shape[0]
+        
+        # Sequence parallel debug info
+        if hasattr(self, 'sp_size') and self.sp_size > 1:
+            from xfuser.core.distributed import get_sequence_parallel_rank
+            sp_rank = get_sequence_parallel_rank()
+            if sp_rank == 0:
+                print(f"Inference with sequence parallel size: {self.sp_size}")
 
         # Step 2.1: Spatial denoising loop
         self.denoising_step_list[0]=current_step
@@ -144,19 +221,9 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                     current_start=current_start,
                     current_end=current_end
                 )
-
-        self.generator(
-            noisy_image_or_video=denoised_pred,
-            conditional_dict=self.conditional_dict,
-            timestep=timestep * 0,
-            kv_cache=self.kv_cache1,
-            crossattn_cache=self.crossattn_cache,
-            current_start=current_start,
-            current_end=current_end
-        )
-
-        # Step 3: Decode the output
-        # video = self.vae.stream_decode_to_pixel(denoised_pred)    
-        # video = (video * 0.5 + 0.5).clamp(0, 1)
+                
+        # Sequence parallel synchronization
+        if dist.is_initialized():
+            dist.barrier()
 
         return denoised_pred

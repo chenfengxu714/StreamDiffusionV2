@@ -91,6 +91,7 @@ parser.add_argument("--height", type=int, default=480)
 parser.add_argument("--width", type=int, default=832)
 parser.add_argument("--fps", type=int, default=30)
 parser.add_argument("--memory_snapshot", action="store_true", default=False)
+parser.add_argument("--fold", action="store_true", default=False)
 
 
 args = parser.parse_args()
@@ -133,9 +134,9 @@ video_list = []
 cost_time = 0
 noise_scale = args.noise_scale
 
-torch.cuda.synchronize()
-start_time = time.time()
 for i in range(num_chuncks):
+    torch.cuda.synchronize()
+    start_time = time.time()
 
     if i==0:
         start_idx = 0
@@ -152,7 +153,7 @@ for i in range(num_chuncks):
 
     l2_dist=(input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
     l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-    noise_scale = (0.8-0.2*l2_dist.item())*0.9+noise_scale*0.1
+    noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
     current_step = int(1000*noise_scale)-100
 
     latents = pipeline.vae.model.stream_encode(input_video)
@@ -176,6 +177,10 @@ for i in range(num_chuncks):
     video = (video * 0.5 + 0.5).clamp(0, 1)
 
     video_output = video[0].permute(0, 2, 3, 1).cpu().numpy()
+    torch.cuda.synchronize()
+    cost_time=time.time()-start_time
+    T=video_output.shape[0]
+    print(f"Time taken: {cost_time:.4f} seconds, {T} frames, FPS: {T/cost_time:.4f}")
 
     video_list.append(video_output)
 
@@ -184,15 +189,8 @@ for i in range(num_chuncks):
         torch.cuda.memory._record_memory_history(enabled=None)
         exit(0)
 
-torch.cuda.synchronize()
-cost_time+=time.time()-start_time
 
 video = np.concatenate(video_list, axis=0)
-
-T=video.shape[0]
-
-print(f"Time taken: {cost_time} seconds")
-print(f"{T} frames, FPS: {T/cost_time}")
 
 export_to_video(
     video, os.path.join(args.output_folder, f"output_{0:03d}.mp4"), fps=args.fps)
