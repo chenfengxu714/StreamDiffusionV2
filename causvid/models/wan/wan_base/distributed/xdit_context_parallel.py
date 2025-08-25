@@ -11,6 +11,7 @@ from ..modules.attention import attention
 
 import torch.distributed as dist
 import math
+import time
 
 
 def pad_freqs(original_tensor, target_len):
@@ -25,8 +26,6 @@ def pad_freqs(original_tensor, target_len):
     padded_tensor = torch.cat([original_tensor, padding_tensor], dim=0)
     return padded_tensor
 
-
-@amp.autocast(enabled=False)
 def rope_apply(x, grid_sizes, freqs):
     """
     x:          [B, L, N, C].
@@ -181,7 +180,6 @@ def usp_dit_forward(
     x = torch.chunk(
         x, get_sequence_parallel_world_size(),
         dim=1)[get_sequence_parallel_rank()]
-    
 
     for block_index, block in enumerate(self.blocks):
         kwargs.update(
@@ -193,7 +191,6 @@ def usp_dit_forward(
             }
         )
         x = block(x, **kwargs)
-
     # head
     x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))
 
@@ -227,7 +224,8 @@ def usp_attn_forward(self,
     q, k, v = qkv_fn(x)
 
     frame_seqlen = math.prod(grid_sizes[0][1:]).item()
-    current_start_frame = current_start // (frame_seqlen//dist.get_world_size())
+    frame_seqlen = frame_seqlen // dist.get_world_size()
+    current_start_frame = current_start // frame_seqlen
     roped_query = causal_rope_apply(
         q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
     roped_key = causal_rope_apply(
@@ -276,13 +274,8 @@ def usp_attn_forward(self,
     #     kv_cache["k"][:, :local_end_index],
     #     kv_cache["v"][:, :local_end_index]
     # )
-
     kv_cache["global_end_index"].fill_(current_end)
     kv_cache["local_end_index"].fill_(local_end_index)
-
-    if dist.is_initialized():
-        dist.broadcast(kv_cache["global_end_index"], src=0)
-        dist.broadcast(kv_cache["local_end_index"], src=0)
 
     # output
     x = x.flatten(2)
