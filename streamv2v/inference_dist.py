@@ -201,6 +201,15 @@ def generate():
             
         if i==0:
             pipeline.prepare(latents, text_prompts=prompts)
+        
+        if world_size > 1:
+            if rank == 0:
+                seed = torch.randint(0, 1000000, (1,), device=device)
+            else:
+                seed = torch.zeros(1, dtype=torch.long, device=device)
+            dist.broadcast(seed, src=0)
+            torch.manual_seed(seed.item())
+        
         noise = torch.randn_like(latents)
         noisy_latents = noise*noise_scale + latents*(1-noise_scale)
         

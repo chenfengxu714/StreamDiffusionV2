@@ -280,6 +280,10 @@ def usp_attn_forward(self,
     kv_cache["global_end_index"].fill_(current_end)
     kv_cache["local_end_index"].fill_(local_end_index)
 
+    if dist.is_initialized():
+        dist.broadcast(kv_cache["global_end_index"], src=0)
+        dist.broadcast(kv_cache["local_end_index"], src=0)
+
     # output
     x = x.flatten(2)
     x = self.o(x)

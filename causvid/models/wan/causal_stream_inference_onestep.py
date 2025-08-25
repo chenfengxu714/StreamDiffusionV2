@@ -93,29 +93,12 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         """
         kv_cache1 = []
         world_size = dist.get_world_size() if dist.is_initialized() else 1
-        rank = dist.get_rank() if dist.is_initialized() else 0
         
-        # Get sequence parallel info
-        if hasattr(self, 'sp_size') and self.sp_size > 1:
-            from xfuser.core.distributed import get_sequence_parallel_rank
-            sp_rank = get_sequence_parallel_rank()
-        else:
-            sp_rank = 0
-            
-        for i in range(self.num_transformer_blocks):
-            # Adjust cache size based on sequence parallel rank
-            if self.sp_size > 1:
-                # In sequence parallel, each rank handles partial sequence
-                cache_length = self.kv_cache_length // self.sp_size
-                if sp_rank == self.sp_size - 1:  # Last rank handles remainder
-                    cache_length += self.kv_cache_length % self.sp_size
-            else:
-                cache_length = self.kv_cache_length
-                
-            # Handle fold case
-            if world_size > 1 and rank==0 and i == self.num_transformer_blocks - 1 and self.fold:
-                cache_length *= 4
-                
+        for _ in range(self.num_transformer_blocks):
+            cache_length = self.kv_cache_length
+            # if world_size > 1:
+            #     cache_length = cache_length // world_size
+
             kv_cache1.append({
                 "k": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
                 "v": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
