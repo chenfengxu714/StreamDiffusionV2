@@ -8,11 +8,13 @@ import torch
 import torch.distributed as dist
 import types
 from functools import partial
+from causvid.models.wan.wan_base.distributed.fsdp import shard_model
 
 class CausalStreamInferencePipeline(torch.nn.Module):
     def __init__(self, args, device):
         super().__init__()
         self.device = device
+        shard_fn = partial(shard_model, device_id=device)
         # Step 1: Initialize all models
         self.generator_model_name = getattr(
             args, "generator_name", args.model_name)
@@ -52,16 +54,50 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         print(f"KV inference with {self.num_frame_per_block} frames per block")
 
-        self.generator.model.to(self.device)
+        if self.num_frame_per_block > 1:
+            self.generator.model.num_frame_per_block = self.num_frame_per_block
+
+        if args.ulysses_size > 1 or args.ring_size > 1:
+            from xfuser.core.distributed import get_sequence_parallel_world_size, get_sp_group
+
+            from causvid.models.wan.wan_base.distributed.xdit_context_parallel import (
+                usp_attn_forward,
+                usp_dit_forward,
+            )
+            for block in self.generator.model.blocks:
+                block.self_attn.forward = types.MethodType(
+                    usp_attn_forward, block.self_attn)
+            self.generator.model.forward = types.MethodType(usp_dit_forward, self.generator.model)
+            self.sp_size = get_sequence_parallel_world_size()
+            
+            # Get sequence parallel process group for FSDP
+            self.sp_group = get_sp_group().device_group
+        else:
+            self.sp_size = 1
+            self.sp_group = None
+
+        if dist.is_initialized():
+            dist.barrier()
+        if args.ulysses_size > 1 or args.ring_size > 1:
+            # Use sequence parallel process group for FSDP sharding
+            self.generator.model = shard_fn(
+                self.generator.model, 
+                process_group=self.sp_group
+            )
+        else:
+            self.generator.model.to(self.device)
 
     def _initialize_kv_cache(self, batch_size, dtype, device):
         """
         Initialize a Per-GPU KV cache for the Wan model.
         """
         kv_cache1 = []
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
         
         for _ in range(self.num_transformer_blocks):
             cache_length = self.kv_cache_length
+            # if world_size > 1:
+            #     cache_length = cache_length // world_size
 
             kv_cache1.append({
                 "k": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
@@ -90,6 +126,13 @@ class CausalStreamInferencePipeline(torch.nn.Module):
     def prepare(self, noise: torch.Tensor=None, text_prompts: List[str]=None, batch_size: int=None):
         batch_size = noise.shape[0]
         
+        # Check sequence parallel status
+        if hasattr(self, 'sp_size') and self.sp_size > 1:
+            from xfuser.core.distributed import get_sequence_parallel_rank, get_sequence_parallel_world_size
+            sp_rank = get_sequence_parallel_rank()
+            sp_size = get_sequence_parallel_world_size()
+            print(f"Sequence parallel: rank {sp_rank}/{sp_size}")
+            
         self.conditional_dict = self.text_encoder(
             text_prompts=text_prompts
         )
@@ -118,6 +161,13 @@ class CausalStreamInferencePipeline(torch.nn.Module):
     def inference(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
         batch_size = noise.shape[0]
         
+        # Sequence parallel debug info
+        if hasattr(self, 'sp_size') and self.sp_size > 1:
+            from xfuser.core.distributed import get_sequence_parallel_rank
+            sp_rank = get_sequence_parallel_rank()
+            if sp_rank == 0:
+                print(f"Inference with sequence parallel size: {self.sp_size}")
+
         # Step 2.1: Spatial denoising loop
         self.denoising_step_list[0]=current_step
         for index, current_timestep in enumerate(self.denoising_step_list):
@@ -155,4 +205,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                     current_end=current_end
                 )
                 
+        # Sequence parallel synchronization
+        if dist.is_initialized():
+            dist.barrier()
+
         return denoised_pred

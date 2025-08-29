@@ -103,6 +103,17 @@ class CausalWanSelfAttention(nn.Module):
             v = self.v(x).view(b, s, n, d)
             return q, k, v
 
+        # world_size = dist.get_world_size() if dist.is_initialized() else 1
+        # if not self.training and dist.is_initialized() and world_size > 1:
+        #     x_avg = x.clone()
+        #     dist.all_reduce(x_avg, op=dist.ReduceOp.SUM)
+        #     x_avg = x_avg / world_size
+
+        #     x = 0.6 * x + 0.4 * x_avg
+        # elif self.training and b > 1:
+        #     x_avg = x.mean(dim=0, keepdim=True)
+        #     x = 0.6 * x + 0.4 * x_avg
+
         q, k, v = qkv_fn(x)
 
         if kv_cache is None:
