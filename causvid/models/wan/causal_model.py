@@ -103,17 +103,6 @@ class CausalWanSelfAttention(nn.Module):
             v = self.v(x).view(b, s, n, d)
             return q, k, v
 
-        # world_size = dist.get_world_size() if dist.is_initialized() else 1
-        # if not self.training and dist.is_initialized() and world_size > 1:
-        #     x_avg = x.clone()
-        #     dist.all_reduce(x_avg, op=dist.ReduceOp.SUM)
-        #     x_avg = x_avg / world_size
-
-        #     x = 0.6 * x + 0.4 * x_avg
-        # elif self.training and b > 1:
-        #     x_avg = x.mean(dim=0, keepdim=True)
-        #     x = 0.6 * x + 0.4 * x_avg
-
         q, k, v = qkv_fn(x)
 
         if kv_cache is None:
@@ -592,7 +581,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         kv_cache: dict = None,
         crossattn_cache: dict = None,
         current_start: int = 0,
-        current_end: int = 0
+        current_end: int = 0,
+        block_mode: str = 'input',
+        block_num: int = -1,
+        patched_x_shape: torch.Tensor = None,
     ):
         r"""
         Run the diffusion model with kv caching.
@@ -625,11 +617,18 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
 
-        if y is not None:
-            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
+        if block_mode == 'input':
+            if y is not None:
+                x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
-        # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+            # embeddings
+            x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+            bsz, cch, tlen, hh, ww = x[0].shape
+            patched_x_shape = torch.tensor([bsz, cch, tlen, hh, ww], dtype=torch.int64, device=device)
+        else:
+            bsz, cch, tlen, hh, ww = [int(i) for i in patched_x_shape.tolist()]
+            x = [x.permute(0,2,1).reshape(bsz, cch, tlen, hh, ww)]
+            
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
         x = [u.flatten(2).transpose(1, 2) for u in x]
@@ -675,10 +674,17 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             block_mask=self.block_mask
         )
 
+        def create_custom_forward(module):
+            def custom_forward(*inputs, **kwargs):
+                return module(*inputs, **kwargs)
+            return custom_forward
+
         for block_index, block in enumerate(self.blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 assert False
             else:
+                if block_mode == 'output' and block_index <= block_num:
+                    continue
                 kwargs.update(
                     {
                         "kv_cache": kv_cache[block_index],
@@ -688,6 +694,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     }
                 )
                 x = block(x, **kwargs)
+                if block_mode == 'input' and block_index == block_num:
+                    return x, patched_x_shape
 
         # head
         x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))

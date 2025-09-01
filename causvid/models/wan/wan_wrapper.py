@@ -12,6 +12,8 @@ from causvid.models.wan.causal_model import CausalWanModel
 from typing import List, Tuple, Dict, Optional
 import torch
 import os
+import torch.distributed as dist
+import time
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
@@ -92,6 +94,21 @@ class WanVAEWrapper(VAEInterface):
         # from [batch_size, num_channels, num_frames, height, width]
         # to [batch_size, num_frames, num_channels, height, width]
         output = output.permute(0, 2, 1, 3, 4)
+        return output
+
+    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        # from [batch_size, num_frames, num_channels, height, width]
+        # to [batch_size, num_channels, num_frames, height, width]
+        zs = latent.permute(0, 2, 1, 3, 4)
+
+        device, dtype = latent.device, latent.dtype
+        scale = [self.mean.to(device=device, dtype=dtype),
+                 1.0 / self.std.to(device=device, dtype=dtype)]
+
+        output = self.model.decode(zs, scale).clamp_(-1, 1)
+        # from [batch_size, num_channels, num_frames, height, width]
+        # to [batch_size, num_frames, num_channels, height, width]
+        # output = output.permute(0, 2, 1, 3, 4)
         return output
     
     def stream_decode_to_pixel(self, latent: torch.Tensor) -> torch.Tensor:
@@ -205,6 +222,79 @@ class WanDiffusionWrapper(DiffusionModelInterface):
                 t=input_timestep, context=prompt_embeds,
                 seq_len=self.seq_len
             ).permute(0, 2, 1, 3, 4)
+
+        pred_x0 = self._convert_flow_pred_to_x0(
+            flow_pred=flow_pred.flatten(0, 1),
+            xt=noisy_image_or_video.flatten(0, 1),
+            timestep=timestep.flatten(0, 1)
+        ).unflatten(0, flow_pred.shape[:2])
+
+        return pred_x0
+
+    def forward_input(
+        self, noisy_image_or_video: torch.Tensor, conditional_dict: dict,
+        timestep: torch.Tensor,block_mode: str='input', block_num: int=-1, kv_cache: Optional[List[dict]] = None,
+        crossattn_cache: Optional[List[dict]] = None,
+        current_start: Optional[int] = None,
+        current_end: Optional[int] = None,
+        patched_x_shape: torch.Tensor = None,
+    ) -> torch.Tensor:
+        assert kv_cache is not None, "kv_cache must be provided"
+
+        prompt_embeds = conditional_dict["prompt_embeds"]
+
+        # [B, F] -> [B]
+        if self.uniform_timestep:
+            input_timestep = timestep[:, 0]
+        else:
+            input_timestep = timestep
+
+        output = self.model(
+            noisy_image_or_video.permute(0, 2, 1, 3, 4),
+            t=input_timestep, context=prompt_embeds,
+            seq_len=self.seq_len,
+            kv_cache=kv_cache,
+            crossattn_cache=crossattn_cache,
+            current_start=current_start,
+            current_end=current_end,
+            block_mode=block_mode,
+            block_num=block_num,
+            patched_x_shape=patched_x_shape,
+        )
+
+        return output
+
+    def forward_output(
+        self, noisy_image_or_video: torch.Tensor, conditional_dict: dict,
+        timestep: torch.Tensor, block_mode: str='output', block_num: int=-1, kv_cache: Optional[List[dict]] = None,
+        crossattn_cache: Optional[List[dict]] = None,
+        current_start: Optional[int] = None,
+        current_end: Optional[int] = None,
+        patched_x_shape: torch.Tensor = None,
+        block_x: torch.Tensor = None,
+    ) -> torch.Tensor:
+        assert kv_cache is not None, "kv_cache must be provided"
+
+        prompt_embeds = conditional_dict["prompt_embeds"]
+
+        # [B, F] -> [B]
+        if self.uniform_timestep:
+            input_timestep = timestep[:, 0]
+        else:
+            input_timestep = timestep
+
+        flow_pred = self.model(
+            block_x,
+            t=input_timestep, context=prompt_embeds,
+            seq_len=self.seq_len,
+            kv_cache=kv_cache,
+            crossattn_cache=crossattn_cache,
+            current_start=current_start,
+            current_end=current_end,
+            block_mode=block_mode,
+            block_num=block_num,
+            patched_x_shape=patched_x_shape,
+        ).permute(0, 2, 1, 3, 4)
 
         pred_x0 = self._convert_flow_pred_to_x0(
             flow_pred=flow_pred.flatten(0, 1),
