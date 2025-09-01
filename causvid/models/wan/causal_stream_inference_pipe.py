@@ -116,7 +116,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 self.crossattn_cache[block_index]["is_init"] = False
 
     def inference(self, noise: torch.Tensor, current_start: int, current_end: int, \
-        current_step: int, block_mode: str='input', block_num: int=-1,\
+        current_step: int, block_mode: str='input', block_num=None,\
             patched_x_shape: torch.Tensor=None, block_x: torch.Tensor=None) -> torch.Tensor:
         batch_size = noise.shape[0]
         
@@ -151,20 +151,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 ).unflatten(0, denoised_pred.shape[:2])
             else:
                 # for getting real output
-                if block_mode == 'input':
-                    denoised_pred = self.generator.forward_input(
-                        noisy_image_or_video=noise,
-                        conditional_dict=self.conditional_dict,
-                        timestep=timestep,
-                        kv_cache=self.kv_cache1,
-                        crossattn_cache=self.crossattn_cache,
-                        current_start=current_start,
-                        current_end=current_end,
-                        block_mode=block_mode,
-                        block_num=block_num,
-                        patched_x_shape=patched_x_shape
-                    )
-                elif block_mode == 'output':
+                if block_mode == 'output':
                     denoised_pred = self.generator.forward_output(
                         noisy_image_or_video=noise,
                         conditional_dict=self.conditional_dict,
@@ -178,5 +165,18 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                         patched_x_shape=patched_x_shape,
                         block_x=block_x
                     )
-                
+                else:
+                    denoised_pred = self.generator.forward_input(
+                        noisy_image_or_video=noise,
+                        conditional_dict=self.conditional_dict,
+                        timestep=timestep,
+                        kv_cache=self.kv_cache1,
+                        crossattn_cache=self.crossattn_cache,
+                        current_start=current_start,
+                        current_end=current_end,
+                        block_mode=block_mode,
+                        block_num=block_num,
+                        patched_x_shape=patched_x_shape
+                    ) 
+
         return denoised_pred

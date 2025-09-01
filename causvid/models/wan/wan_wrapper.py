@@ -233,7 +233,7 @@ class WanDiffusionWrapper(DiffusionModelInterface):
 
     def forward_input(
         self, noisy_image_or_video: torch.Tensor, conditional_dict: dict,
-        timestep: torch.Tensor,block_mode: str='input', block_num: int=-1, kv_cache: Optional[List[dict]] = None,
+        timestep: torch.Tensor,block_mode: str='input', block_num = None, kv_cache: Optional[List[dict]] = None,
         crossattn_cache: Optional[List[dict]] = None,
         current_start: Optional[int] = None,
         current_end: Optional[int] = None,
@@ -248,9 +248,12 @@ class WanDiffusionWrapper(DiffusionModelInterface):
             input_timestep = timestep[:, 0]
         else:
             input_timestep = timestep
+        
+        if len(noisy_image_or_video.shape) == 5:
+            noisy_image_or_video = noisy_image_or_video.permute(0, 2, 1, 3, 4)
 
         output = self.model(
-            noisy_image_or_video.permute(0, 2, 1, 3, 4),
+            noisy_image_or_video,
             t=input_timestep, context=prompt_embeds,
             seq_len=self.seq_len,
             kv_cache=kv_cache,
@@ -266,7 +269,7 @@ class WanDiffusionWrapper(DiffusionModelInterface):
 
     def forward_output(
         self, noisy_image_or_video: torch.Tensor, conditional_dict: dict,
-        timestep: torch.Tensor, block_mode: str='output', block_num: int=-1, kv_cache: Optional[List[dict]] = None,
+        timestep: torch.Tensor, block_mode: str='output', block_num = None, kv_cache: Optional[List[dict]] = None,
         crossattn_cache: Optional[List[dict]] = None,
         current_start: Optional[int] = None,
         current_end: Optional[int] = None,

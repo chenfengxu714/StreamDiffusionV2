@@ -17,6 +17,13 @@ from einops import rearrange
 import queue
 import threading
 
+TAG_LATENT_HDR = 11001
+TAG_LATENT_PAY = 11002
+TAG_START_END_STEP = 11003
+TAG_PATCHED_X_SHAPE = 11004
+TAG_LATENT_ORIGIN_HDR = 11005
+TAG_LATENT_ORIGIN_PAY = 11006
+
 def load_mp4_as_tensor(
     video_path: str,
     max_frames: int = None,
@@ -55,50 +62,75 @@ def load_mp4_as_tensor(
 
     return video  # [C, T, H, W]
 
+def send_latents_fn(i, latents, original_latents, patched_x_shape, current_start, current_end, current_step, device, rank, outstanding):
+    # build header on GPU (NCCL requires GPU tensors for send/recv)
+    bsz, slen, cch = latents.shape
+    header = torch.tensor([i, bsz, slen, cch], dtype=torch.int64, device=device)
 
-def process_chunk_with_pipeline(pipeline: CausalStreamInferencePipeline,
-                                input_video: torch.Tensor,
-                                prompts,
-                                noise_scale: float,
-                                current_start: int,
-                                current_end: int,
-                                current_step: int,
-                                is_first_chunk: bool,
-                                end_idx: int,
-                                chunck_size: int = 4) -> np.ndarray:
-    print(f"Processing chunk {current_start} to {current_end} on gpu {dist.get_rank()}")
-    device = next(p for p in pipeline.generator.parameters()).device
-    input_video = input_video.to(device=device, dtype=torch.bfloat16)
+    bsz, cch, tlen, hh, ww = original_latents.shape
+    header_origin = torch.tensor([i, bsz, cch, tlen, hh, ww], dtype=torch.int64, device=device)
 
-    # l2_dist = (input_video[:,:,end_idx-chunck_size:end_idx] -
-    #             input_video[:,:,end_idx-chunck_size-1:end_idx-1])**2
-    # l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-    # noise_scale = (0.8-0.1*l2_dist.item())*0.9 + noise_scale*0.1
-    current_step = int(1000*noise_scale)-100
+    # non-blocking sends
+    work_h = dist.isend(header, dst=rank+1, tag=TAG_LATENT_HDR)
+    work_p = dist.isend(latents, dst=rank+1, tag=TAG_LATENT_PAY)
+    work_h_0 = dist.isend(header_origin, dst=rank+1, tag=TAG_LATENT_ORIGIN_HDR)
+    work_p_0 = dist.isend(original_latents, dst=rank+1, tag=TAG_LATENT_ORIGIN_PAY)
+    work_shape = dist.isend(patched_x_shape, dst=rank+1, tag=TAG_PATCHED_X_SHAPE)
+    work_s = dist.isend(torch.tensor([current_start, current_end, current_step], dtype=torch.int64, device=device), dst=rank+1, tag=TAG_START_END_STEP)
 
-    latents = pipeline.vae.model.stream_encode(input_video)  # [B, 4, T, H//16, W//16]
-    latents = latents.transpose(2,1)
+    # keep references until send completes
+    outstanding.append((work_h, work_p, work_h_0, work_p_0, work_shape, work_s))
 
-    if is_first_chunk or getattr(pipeline, "kv_cache1", None) is None:
-        pipeline.prepare(latents, text_prompts=prompts)
+def receiver_thread_fn(rank, num_chuncks, device, free_buffers, free_buffers_origin, decode_queue, receiver_stop):
+    for _ in range(num_chuncks):
+        # receive header first (on GPU)
+        lhdr = torch.empty(4, dtype=torch.int64, device=device)
+        dist.recv(lhdr, src=rank-1, tag=TAG_LATENT_HDR)
 
-    # noise = torch.randn_like(latents)
-    # noisy_latents = noise*noise_scale + latents*(1-noise_scale)
+        ci, bsz, slen, cch = [int(x) for x in lhdr.tolist()]
+        shape = (bsz, slen, cch)
 
-    # denoised_pred = pipeline.inference(
-    #     noise=noisy_latents,
-    #     current_start=current_start,
-    #     current_end=current_end,
-    #     current_step=current_step,
-    # )
-    denoised_pred = latents
+        # get or allocate buffer (reuse if possible)
+        buf = None
+        if shape in free_buffers and len(free_buffers[shape]) > 0:
+            buf = free_buffers[shape].pop()
+        else:
+            # allocate new on GPU with same dtype as sent
+            buf = torch.empty(shape, dtype=torch.bfloat16, device=device)
 
-    video = pipeline.vae.stream_decode_to_pixel(denoised_pred)  # [B, T, H, W, 3]
-    video = (video * 0.5 + 0.5).clamp(0, 1)
-    video = video.permute(0,2,1,3,4)  # [B, C, T, H, W]
-    video_output = video[0].permute(0, 2, 3, 1).contiguous().float().cpu().numpy()  # [T,H,W,3]
-    return video_output
+        # blocking recv into buf
+        dist.recv(buf, src=rank-1, tag=TAG_LATENT_PAY)
 
+        # receive header first (on GPU)
+        lhdr = torch.empty(6, dtype=torch.int64, device=device)
+        dist.recv(lhdr, src=rank-1, tag=TAG_LATENT_ORIGIN_HDR)
+
+        ci, bsz, cch, tlen, hh, ww = [int(x) for x in lhdr.tolist()]
+        shape = (bsz, cch, tlen, hh, ww)
+
+        # get or allocate buffer (reuse if possible)
+        buf_0 = None
+        if shape in free_buffers_origin and len(free_buffers_origin[shape]) > 0:
+            buf_0 = free_buffers_origin[shape].pop()
+        else:
+            # allocate new on GPU with same dtype as sent
+            buf_0 = torch.empty(shape, dtype=torch.bfloat16, device=device)
+
+        # blocking recv into buf
+        dist.recv(buf_0, src=rank-1, tag=TAG_LATENT_ORIGIN_PAY)
+
+        patched_x_shape = torch.empty(5, dtype=torch.int64, device=device)
+        start_end_step = torch.empty(3, dtype=torch.int64, device=device)
+        dist.recv(patched_x_shape, src=rank-1, tag=TAG_PATCHED_X_SHAPE)
+
+        dist.recv(start_end_step, src=rank-1, tag=TAG_START_END_STEP)
+        current_start, current_end, current_step = [int(x) for x in start_end_step.tolist()]
+
+        # put into decode queue (this will block if decode queue is full)
+        decode_queue.put((ci, buf, buf_0, current_start, current_end, current_step, patched_x_shape))
+
+    # received all expected chunks -> signal done
+    receiver_stop.set()
 
 def init_distributed():
     if not dist.is_initialized():
@@ -133,6 +165,8 @@ def main():
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
 
+    assert world_size >= 2, "world_size must be at least 2"
+
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
 
@@ -160,8 +194,6 @@ def main():
     dist.broadcast(num_chuncks_tensor, src=0)
     num_chuncks = int(num_chuncks_tensor.item())
 
-    assert world_size >= 2, "需要至少2个GPU进行编码-解码流水线"
-
     # Build pipeline (keep existing init style)
     pipeline = CausalStreamInferencePipeline(config, device=str(device))
     pipeline.to(device=str(device), dtype=torch.bfloat16)
@@ -186,15 +218,21 @@ def main():
                 current_start = current_end
                 current_end = current_end+(chunck_size//4)*pipeline.frame_seq_length
             chunk_meta.append((start_idx, end_idx, current_start, current_end))
-
-    TAG_LATENT_HDR = 11001
-    TAG_LATENT_PAY = 11002
-    TAG_START_END_STEP = 11003
-    TAG_PATCHED_X_SHAPE = 11004
-    TAG_LATENT_ORIGIN_HDR = 11005
-    TAG_LATENT_ORIGIN_PAY = 11006
     
-    block_num = 24
+    total_block_num = []
+    total_blocks = 29
+    if world_size == 2:
+        total_block_num = [[24], [24]]
+    else:
+        total_block_num.append([0])
+        num_middle = world_size - 2
+        for i in range(num_middle):
+            start = int(i * total_blocks // num_middle)
+            end = int((i + 1) * total_blocks // num_middle)
+            total_block_num.append([start, end])
+        total_block_num.append([total_blocks])
+
+    block_num = total_block_num[rank]
 
     noise_scale = args.noise_scale
     MAX_OUTSTANDING = args.max_outstanding
@@ -243,27 +281,12 @@ def main():
                 except Exception:
                     raise Exception(f"Error waiting for outstanding chunks {i}")
 
-            # build header on GPU (NCCL requires GPU tensors for send/recv)
-            bsz, slen, cch = denoised_pred.shape
-            header = torch.tensor([i, bsz, slen, cch], dtype=torch.int64, device=device)
+            send_latents_fn(i, denoised_pred, noisy_latents, patched_x_shape, current_start, current_end, current_step, device, rank, outstanding)
 
-            bsz, cch, tlen, hh, ww = noisy_latents.shape
-            header_origin = torch.tensor([i, bsz, cch, tlen, hh, ww], dtype=torch.int64, device=device)
-
-            # non-blocking sends
-            work_h = dist.isend(header, dst=1, tag=TAG_LATENT_HDR)
-            work_p = dist.isend(denoised_pred, dst=1, tag=TAG_LATENT_PAY)
-            work_h_0 = dist.isend(header_origin, dst=1, tag=TAG_LATENT_ORIGIN_HDR)
-            work_p_0 = dist.isend(noisy_latents, dst=1, tag=TAG_LATENT_ORIGIN_PAY)
-            work_shape = dist.isend(patched_x_shape, dst=1, tag=TAG_PATCHED_X_SHAPE)
-            work_s = dist.isend(torch.tensor([current_start, current_end, current_step], dtype=torch.int64, device=device), dst=1, tag=TAG_START_END_STEP)
-
-            # keep references until send completes
-            outstanding.append((work_h, work_p, work_h_0, work_p_0, work_shape, work_s))
             torch.cuda.synchronize()
             end_time = time.time()
             t = end_time - start_time
-            print(f"[rank0] Encode time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
+            print(f"[rank 0] Encode time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
             start_time = end_time
 
         for (w_h, w_p, w_h_0, w_p_0, w_shape, w_s) in outstanding:
@@ -273,8 +296,9 @@ def main():
             w_p_0.wait()
             w_s.wait()
             w_shape.wait()
-    # ----- RANK 1: receiver thread(s) + decode loop -----
-    elif rank == 1:
+
+    # ----- RANK {world_size - 1}: receiver thread(s) + decode loop -----
+    elif rank == world_size - 1:
         os.makedirs(args.output_folder, exist_ok=True)
         prepared = False
         results = {}
@@ -288,63 +312,8 @@ def main():
 
         receiver_stop = threading.Event()
 
-        def receiver_thread_fn():
-            # each thread must set device
-            torch.cuda.set_device(local_rank)
-            device_t = torch.device(f"cuda:{local_rank}")
-
-            for _ in range(num_chuncks):
-                # receive header first (on GPU)
-                lhdr = torch.empty(4, dtype=torch.int64, device=device_t)
-                dist.recv(lhdr, src=0, tag=TAG_LATENT_HDR)
-
-                ci, bsz, slen, cch = [int(x) for x in lhdr.tolist()]
-                shape = (bsz, slen, cch)
-
-                # get or allocate buffer (reuse if possible)
-                buf = None
-                if shape in free_buffers and len(free_buffers[shape]) > 0:
-                    buf = free_buffers[shape].pop()
-                else:
-                    # allocate new on GPU with same dtype as sent
-                    buf = torch.empty(shape, dtype=torch.bfloat16, device=device_t)
-
-                # blocking recv into buf
-                dist.recv(buf, src=0, tag=TAG_LATENT_PAY)
-
-                # receive header first (on GPU)
-                lhdr = torch.empty(6, dtype=torch.int64, device=device_t)
-                dist.recv(lhdr, src=0, tag=TAG_LATENT_ORIGIN_HDR)
-
-                ci, bsz, cch, tlen, hh, ww = [int(x) for x in lhdr.tolist()]
-                shape = (bsz, cch, tlen, hh, ww)
-
-                # get or allocate buffer (reuse if possible)
-                buf_0 = None
-                if shape in free_buffers_origin and len(free_buffers_origin[shape]) > 0:
-                    buf_0 = free_buffers_origin[shape].pop()
-                else:
-                    # allocate new on GPU with same dtype as sent
-                    buf_0 = torch.empty(shape, dtype=torch.bfloat16, device=device_t)
-
-                # blocking recv into buf
-                dist.recv(buf_0, src=0, tag=TAG_LATENT_ORIGIN_PAY)
-
-                patched_x_shape = torch.empty(5, dtype=torch.int64, device=device_t)
-                start_end_step = torch.empty(3, dtype=torch.int64, device=device_t)
-                dist.recv(patched_x_shape, src=0, tag=TAG_PATCHED_X_SHAPE)
-
-                dist.recv(start_end_step, src=0, tag=TAG_START_END_STEP)
-                current_start, current_end, current_step = [int(x) for x in start_end_step.tolist()]
-
-                # put into decode queue (this will block if decode queue is full)
-                decode_queue.put((ci, buf, buf_0, current_start, current_end, current_step, patched_x_shape))
-
-            # received all expected chunks -> signal done
-            receiver_stop.set()
-
         # start receiver thread
-        rcv_thread = threading.Thread(target=receiver_thread_fn, daemon=True)
+        rcv_thread = threading.Thread(target=receiver_thread_fn, args=(rank,num_chuncks, device, free_buffers, free_buffers_origin, decode_queue, receiver_stop), daemon=True)
         rcv_thread.start()
 
         processed = 0
@@ -386,7 +355,7 @@ def main():
             torch.cuda.synchronize()
             end_time = time.time()
             t = end_time - start_time
-            print(f"[rank1] Decode time: {t:.4f} s, fps: {video.shape[0]/t:.4f}")
+            print(f"[rank {rank}] Decode time: {t:.4f} s, fps: {video.shape[0]/t:.4f}")
             start_time = end_time
 
         # wait receiver thread to exit cleanly (should have finished num_chuncks)
@@ -397,6 +366,73 @@ def main():
         export_to_video(
             video, os.path.join(args.output_folder, f"output_{0:03d}.mp4"), fps=args.fps)
         print(f"Video saved to: {os.path.join(args.output_folder, f'output_{0:03d}.mp4')}")
+
+    # ----- RANK {middle rank}: receiver thread(s) + dit blocks + sender -----
+    else:
+        os.makedirs(args.output_folder, exist_ok=True)
+        prepared = False
+        outstanding = []  # list of (work_obj, work_obj2, latents_ref, header_ref)
+        results = {}
+
+        # queue for handing received latents to decoder
+        decode_queue = queue.Queue(maxsize=MAX_OUTSTANDING)
+
+        # buffer pool: map from shape tuple -> list of tensors
+        free_buffers = {}  # {(bsz,tlen,cch,hh,ww): [tensor1, ...]}
+        free_buffers_origin = {} 
+
+        receiver_stop = threading.Event()
+
+        # start receiver thread
+        rcv_thread = threading.Thread(target=receiver_thread_fn, args=(rank,num_chuncks, device, free_buffers, free_buffers_origin, decode_queue, receiver_stop), daemon=True)
+        rcv_thread.start()
+
+        processed = 0
+        torch.cuda.synchronize()
+        start_time = time.time()
+        while processed < num_chuncks:
+            i, latents, latents_origin, current_start, current_end, current_step, patched_x_shape = decode_queue.get()  # wait until one chunk available
+
+            shape = tuple(latents.shape)
+
+            if not prepared:
+                # pipeline.prepare will likely initialize caches on rank1
+                pipeline.prepare(latents, text_prompts=prompts)
+                prepared = True
+
+            denoised_pred, _ = pipeline.inference(
+                noise=latents, # [1, 4, 16, 16, 60]
+                current_start=current_start,
+                current_end=current_end,
+                current_step=current_step,
+                block_mode='middle',
+                block_num=block_num,
+                patched_x_shape=patched_x_shape,
+            )
+
+            processed += 1
+
+            while len(outstanding) >= MAX_OUTSTANDING:
+                oldest = outstanding.pop(0)
+                # wait for both header & payload to finish
+                try:
+                    oldest[0].wait()
+                    oldest[1].wait()
+                    oldest[2].wait()
+                    oldest[3].wait()
+                    oldest[4].wait()
+                    oldest[5].wait()
+                except Exception:
+                    raise Exception(f"Error waiting for outstanding chunks {i}")
+
+            send_latents_fn(i, denoised_pred, latents_origin, patched_x_shape, current_start, current_end, current_step, device, rank, outstanding)
+
+            torch.cuda.synchronize()
+            end_time = time.time()
+            t = end_time - start_time
+            print(f"[rank {rank}] Encode time: {t:.4f} s, fps: {chunck_size/t:.4f}")
+            start_time = end_time
+
 
     dist.barrier()
 
