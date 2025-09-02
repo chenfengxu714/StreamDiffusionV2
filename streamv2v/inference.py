@@ -7,7 +7,6 @@ import torch
 import os
 import time
 import numpy as np
-from depth_anything_v2.dpt import DepthAnythingV2
 
 import torchvision
 import torchvision.transforms.functional as TF
@@ -56,30 +55,6 @@ def load_mp4_as_tensor(
 
     return video  # Final shape: [C, T, H, W]
 
-def unfold_2x2_spatial(video: torch.Tensor) -> torch.Tensor:
-    B, C, T, H, W = video.shape
-    assert H % 2 == 0 and W % 2 == 0, "H and W must be divisible by 2"
-    
-    # Reshape to extract 2x2 patches
-    video = video.view(B, C, T, H//2, 2, W//2, 2)  # (B, C, T, H//2, 2, W//2, 2)
-
-    # Rearrange 2x2 into 4 positions
-    video = video.permute(0, 4, 6, 1, 2, 3, 5)  # (B, 2, 2, C, T, H//2, W//2)
-    video = video.contiguous().view(B * 4, C, T, H//2, W//2)  # (B*4, C, T, H//2, W//2)
-
-    return video
-
-
-def fold_2x2_spatial(video: torch.Tensor, original_batch: int) -> torch.Tensor:
-    B4, C, T, H_half, W_half = video.shape
-    assert B4 % 4 == 0 and B4 == original_batch * 4
-
-    video = video.view(original_batch, 2, 2, C, T, H_half, W_half)  # (B, 2, 2, C, T, H//2, W//2)
-    video = video.permute(0, 3, 4, 5, 1, 6, 2)  # (B, C, T, H//2, 2, W//2, 2)
-    video = video.contiguous().view(original_batch, C, T, H_half * 2, W_half * 2)  # (B, C, T, H, W)
-
-    return video
-
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str)
@@ -113,10 +88,7 @@ pipeline.generator.load_state_dict(
 input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0) # [1, C, T, H, W]
 input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device="cuda")
 
-# chunck_size=(pipeline.num_frame_per_block-1)*4+1
 chunck_size = 4
-overlap = 0
-# num_chuncks = (input_video_original.shape[2]-overlap) // (chunck_size-overlap)
 num_chuncks = (input_video_original.shape[2]-1) // chunck_size
 
 dataset = TextDataset(args.prompt_file_path)
@@ -198,10 +170,13 @@ for i in range(num_chuncks):
 
     video = video[0].permute(0, 2, 3, 1).cpu().numpy()
 
-    if len(video_list) == 0:
-        video_list.append(video)
-    else:
-        video_list.append(video[overlap:])
+    video_list.append(video)
+
+    torch.cuda.synchronize()
+    end_time = time.time()
+    cost_time = end_time - start_time
+    print(f"Time taken: {cost_time:.4f} seconds, {video.shape[0]} frames, FPS: {video.shape[0]/cost_time:.4f}")
+    start_time = end_time
 
 for i in range(num_steps - 2):
     denoised_pred = pipeline.inference(
@@ -214,20 +189,15 @@ for i in range(num_steps - 2):
 
     video = video[0].permute(0, 2, 3, 1).cpu().numpy()
 
-    if len(video_list) == 0:
-        video_list.append(video)
-    else:
-        video_list.append(video[overlap:])
+    video_list.append(video)
 
-torch.cuda.synchronize()
-cost_time+=time.time()-start_time
+    torch.cuda.synchronize()
+    end_time = time.time()
+    cost_time = end_time - start_time
+    print(f"Time taken: {cost_time:.4f} seconds, {video.shape[0]} frames, FPS: {video.shape[0]/cost_time:.4f}")
+    start_time = end_time
 
 video = np.concatenate(video_list, axis=0)
-
-T=video.shape[0]
-
-print(f"Time taken: {cost_time} seconds")
-print(f"{T} frames, FPS: {T/cost_time}")
 
 export_to_video(
     video, os.path.join(args.output_folder, f"output_{0:03d}.mp4"), fps=args.fps)
