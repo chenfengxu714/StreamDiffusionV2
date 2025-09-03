@@ -184,75 +184,56 @@ class CausalWanSelfAttention(nn.Module):
                 kv_cache["local_end_index"].fill_(local_end_index)
 
             else:
-                for i, (start, end) in enumerate(zip(current_start, current_end)):
-                    # Skip for initial rows with garbage data
-                    if end == 0:
-                        continue
-
-                    num_updated_tokens = roped_query.shape[1]
-                    assert end == start + num_updated_tokens, "current_end should be equal to current_start + num_updated_tokens"
-
-                    # Number of new tokens to be added to the KV cache
-                    num_new_tokens = end - kv_cache["global_end_index"][i].item()
-                    assert num_new_tokens >= 0, "num_new_tokens should be non-negative"
-
+                output_x = []
+                for i, c_start in enumerate(current_start):
+                    current_end = c_start + roped_query.shape[1]
                     sink_tokens = self.sink_size * frame_seqlen
+                    # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
                     kv_cache_size = kv_cache["k"].shape[1]
-
-                    if num_new_tokens > 0:
-                        # We always append new data to the first row, so only the first row has new tokens
-                        assert i == 0, "only the first row will add new tokens"
-                        if kv_cache["local_end_index"][i].item() + num_new_tokens  > kv_cache_size:
-                            num_evicted_tokens =  (
-                                kv_cache["local_end_index"][i].item()
-                                + num_new_tokens
-                                - kv_cache_size
-                            )
-                            num_rolled_tokens = kv_cache["local_end_index"][i].item() - num_evicted_tokens - sink_tokens
-                            kv_cache["k"][i, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                                kv_cache["k"][i, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                            kv_cache["v"][i, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                                kv_cache["v"][i, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                            end_index = kv_cache_size
-                            kv_cache["local_end_index"][i].fill_(end_index)
-                        else:
-                            end_index = kv_cache["local_end_index"][i].item() + num_new_tokens
-                            kv_cache["local_end_index"][i].fill_(end_index)
-                        kv_cache["global_end_index"][i].fill_(end)
+                    num_new_tokens = roped_query.shape[1]
+                    if (current_end > kv_cache["global_end_index"].item()) and (
+                            num_new_tokens + kv_cache["local_end_index"][i].item() > kv_cache_size):
+                        # Calculate the number of new tokens added in this step
+                        # Shift existing cache content left to discard oldest tokens
+                        # Clone the source slice to avoid overlapping memory error
+                        num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
+                        num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
+                        kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                            kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                        kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                            kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                        # Insert the new keys/values at the end
+                        end_index = kv_cache["local_end_index"].item() + current_end - \
+                            kv_cache["global_end_index"].item() - num_evicted_tokens
+                        kv_cache["local_end_index"].fill_(end_index)
                     else:
-                        end_index = kv_cache["local_end_index"][i].item()
+                        end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
+                        if current_end > kv_cache["global_end_index"].item():
+                            kv_cache["local_end_index"].fill_(end_index)
 
-                    start_index = end_index - num_updated_tokens
-                    kv_cache["k"][i, start_index: end_index] = roped_key[i]
-                    kv_cache["v"][i, start_index: end_index] = v[i]
-    
-                    total_evicted_tokens = kv_cache["global_end_index"][i].item() - kv_cache["local_end_index"][i].item()
-                    # If we update the i-th row, we should also update the previous rows (i.e., the kv rows for newer chunks) 
-                    # so the newer chunks can attend to the latest denoised past chunks.
-                    for j in range(i):
-                        cur_evicted_tokens = kv_cache["global_end_index"][j].item() - kv_cache["local_end_index"][j].item()
-                        # This j-th row may have been shifted to the left, this will cause the kv cache index to be shifted left compared to the i-th row.
-                        diff = cur_evicted_tokens - total_evicted_tokens
-                        kv_cache["k"][j, start_index - diff: end_index - diff] = roped_key[i]
-                        kv_cache["v"][j, start_index - diff: end_index - diff] = v[i]
+                    start_index = end_index - num_new_tokens
+                    if start_index >= 0 or end_index <= 0:
+                        # Normal case — no wrap
+                        kv_cache["k"][:, start_index:end_index] = roped_key[[i]]
+                        kv_cache["v"][:, start_index:end_index] = v[[i]]
+                    else:
+                        # Wraparound case — split update
+                        # e.g., start_index = -2, end_index = 2
+                        num_neg = -start_index  # how many tokens go to the end
+                        kv_cache["k"][:, start_index:] = roped_key[[i], :num_neg]
+                        kv_cache["k"][:, :end_index]   = roped_key[[i], num_neg:]
+                        kv_cache["v"][:, start_index:] = v[[i], :num_neg]
+                        kv_cache["v"][:, :end_index]   = v[[i], num_neg:]
 
-                if torch.all(kv_cache["local_end_index"] == kv_cache_size):
-                    attn_mask = None
-                    k_lens = None
-                else:
-                    kv_positions = torch.arange(kv_cache_size, device=roped_query.device).view(1, 1, 1, -1)
-                    # Shape: [B, num_heads, q_len, kv_len]
-                    attn_mask = (
-                        kv_positions < kv_cache["local_end_index"].view(b, 1, 1, 1)
-                    ).expand(-1, 12, roped_query.shape[1], -1)
-                    k_lens = kv_cache["local_end_index"]
-                x = attention(
-                    roped_query,
-                    kv_cache["k"],
-                    kv_cache["v"],
-                    k_lens=k_lens,
-                    attn_mask=attn_mask
-                )
+                    output_x.append(attention(
+                        roped_query[[i]],
+                        kv_cache["k"][:, :end_index],
+                        kv_cache["v"][:, :end_index]
+                    ))
+
+                    kv_cache["global_end_index"].fill_(max(kv_cache["global_end_index"].item(), current_end))
+
+                x = torch.cat(output_x, dim=0)
 
         # output
         x = x.flatten(2)
@@ -583,7 +564,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         current_start: int = 0,
         current_end: int = 0,
         block_mode: str = 'input',
-        block_num: int = -1,
+        block_num: int = [-1],
         patched_x_shape: torch.Tensor = None,
     ):
         r"""
