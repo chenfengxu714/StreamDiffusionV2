@@ -159,8 +159,18 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.batch_size = len(self.denoising_step_list)
 
         for i in range(self.num_transformer_blocks):
+            dist.broadcast(self.crossattn_cache[i]['k'], src=0)
+            dist.broadcast(self.crossattn_cache[i]['v'], src=0)
             self.crossattn_cache[i]['k'] = self.crossattn_cache[i]['k'].repeat(self.batch_size, 1, 1, 1)
             self.crossattn_cache[i]['v'] = self.crossattn_cache[i]['v'].repeat(self.batch_size, 1, 1, 1)
+
+            dist.broadcast(self.kv_cache1[i]['k'], src=0)
+            dist.broadcast(self.kv_cache1[i]['v'], src=0)
+            self.kv_cache1[i]['k'] = self.kv_cache1[i]['k'].repeat(self.batch_size, 1, 1, 1)
+            self.kv_cache1[i]['v'] = self.kv_cache1[i]['v'].repeat(self.batch_size, 1, 1, 1)
+
+            self.kv_cache1[i]['global_end_index'] = self.kv_cache1[i]['global_end_index'].repeat(self.batch_size)
+            self.kv_cache1[i]['local_end_index'] = self.kv_cache1[i]['local_end_index'].repeat(self.batch_size)
 
         self.hidden_states = torch.zeros(
             (self.batch_size, self.num_frame_per_block, *noise.shape[2:]), dtype=noise.dtype, device=device
@@ -170,8 +180,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 (self.batch_size, self.frame_seq_length, 1536), dtype=noise.dtype, device=device
             )
 
-        self.kv_cache_starts = torch.zeros(self.batch_size, dtype=torch.long, device=device)
-        self.kv_cache_ends = torch.zeros(self.batch_size, dtype=torch.long, device=device)
+        self.kv_cache_starts = torch.ones(self.batch_size, dtype=torch.long, device=device) * current_end
+        self.kv_cache_ends = torch.ones(self.batch_size, dtype=torch.long, device=device) * current_end + self.frame_seq_length
 
         self.timestep = self.denoising_step_list
 
@@ -183,22 +193,21 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         current_step: int, block_mode: str='input', block_num=None,\
             patched_x_shape: torch.Tensor=None, block_x: torch.Tensor=None) -> torch.Tensor:
 
-        # hidden_states should be pre-allocated in prepare, no need to create new tensors
-        assert self.hidden_states is not None, "hidden_states should be initialized in prepare"
+        if block_mode == 'input':
+            self.hidden_states[1:] = self.hidden_states[:-1].clone()
+            self.hidden_states[0] = noise[0]
+
+            self.kv_cache_starts[1:] = self.kv_cache_starts[:-1].clone()
+            self.kv_cache_starts[0] = current_start
+            
+            self.kv_cache_ends[1:] = self.kv_cache_ends[:-1].clone()
+            self.kv_cache_ends[0] = current_end
+        else:
+            self.block_x.copy_(block_x)
+            self.hidden_states.copy_(noise)
+            self.kv_cache_starts.copy_(current_start)
+            self.kv_cache_ends.copy_(current_end)
         
-        self.hidden_states[1:] = self.hidden_states[:-1].clone()
-        self.hidden_states[0] = noise[0]
-
-        if block_x is not None:
-            self.block_x[1:] = self.block_x[:-1].clone()
-            self.block_x[0] = block_x[0]
-
-        self.kv_cache_starts[1:] = self.kv_cache_starts[:-1].clone()
-        self.kv_cache_starts[0] = current_start
-        
-        self.kv_cache_ends[1:] = self.kv_cache_ends[:-1].clone()
-        self.kv_cache_ends[0] = current_end
-
         if block_mode == 'output':
             denoised_pred = self.generator.forward_output(
                 noisy_image_or_video=self.hidden_states,

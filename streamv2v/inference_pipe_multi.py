@@ -76,13 +76,14 @@ def send_latents_fn(i, latents, original_latents, patched_x_shape, current_start
     work_h_0 = dist.isend(header_origin, dst=target, tag=TAG_LATENT_ORIGIN_HDR)
     work_p_0 = dist.isend(original_latents, dst=target, tag=TAG_LATENT_ORIGIN_PAY)
     work_shape = dist.isend(patched_x_shape, dst=target, tag=TAG_PATCHED_X_SHAPE)
-    work_s = dist.isend(torch.tensor([current_start, current_end, current_step], dtype=torch.int64, device=device), dst=target, tag=TAG_START_END_STEP)
+    work_s = dist.isend(torch.cat([current_start, current_end, torch.tensor([current_step], dtype=torch.int64, device=device)], dim=0), dst=target, tag=TAG_START_END_STEP)
 
     # keep references until send completes
     outstanding.append((work_h, work_p, work_h_0, work_p_0, work_shape, work_s))
 
-def receive_latents_async(rank, device, free_buffers, free_buffers_origin):
-    target = (rank-1) % dist.get_world_size()
+def receive_latents_async(rank, num_steps, device, free_buffers, free_buffers_origin):
+    world_size = dist.get_world_size()
+    target = (rank-1) % world_size
     # receive header first (on GPU)
     lhdr = torch.empty(4, dtype=torch.int64, device=device)
     dist.recv(lhdr, src=target, tag=TAG_LATENT_HDR)
@@ -120,11 +121,13 @@ def receive_latents_async(rank, device, free_buffers, free_buffers_origin):
     dist.recv(buf_0, src=target, tag=TAG_LATENT_ORIGIN_PAY)
 
     patched_x_shape = torch.empty(5, dtype=torch.int64, device=device)
-    start_end_step = torch.empty(3, dtype=torch.int64, device=device)
+    start_end_step = torch.empty(2*num_steps+1, dtype=torch.int64, device=device)
     dist.recv(patched_x_shape, src=target, tag=TAG_PATCHED_X_SHAPE)
 
     dist.recv(start_end_step, src=target, tag=TAG_START_END_STEP)
-    current_start, current_end, current_step = [int(x) for x in start_end_step.tolist()]
+    current_start = start_end_step[:num_steps]
+    current_end = start_end_step[num_steps:-1]
+    current_step = start_end_step[-1].item()
 
     return ci, buf, buf_0, current_start, current_end, current_step, patched_x_shape
 
@@ -211,7 +214,7 @@ def main():
     total_block_num = []
     total_blocks = 29
     if world_size == 2:
-        total_block_num = [[24], [24]]
+        total_block_num = [[18], [18]]
     else:
         total_block_num.append([0])
         num_middle = world_size - 2
@@ -233,11 +236,14 @@ def main():
     latents = pipeline.vae.model.stream_encode(inp)  # [B, 4, T, H//16, W//16] or so
     latents = latents.transpose(2,1).contiguous().to(dtype=torch.bfloat16)
     noise = torch.randn_like(latents)
+
     noisy_latents = noise*noise_scale + latents*(1-noise_scale)
+    dist.broadcast(noisy_latents, src=0)
 
     com_stream = torch.cuda.Stream()
 
     denoised_pred = pipeline.prepare(text_prompts=prompts, device=device, dtype=torch.bfloat16, noise=noisy_latents, block_mode=block_mode, current_start=current_start, current_end=current_end)
+    dist.broadcast(denoised_pred, src=0)
 
     if rank == world_size - 1:
         results = {}
@@ -252,7 +258,7 @@ def main():
     if rank == 0:
         torch.cuda.synchronize()
         start_time = time.time()
-        while processed < num_chuncks + num_steps:
+        while processed < num_chuncks + num_steps + world_size:
             if end_idx < input_video_original.shape[2]:
                 start_idx = end_idx
                 end_idx = end_idx+chunck_size
@@ -287,10 +293,7 @@ def main():
                     free_buffers_origin = {}  # {(bsz,tlen,cch,hh,ww): [tensor1, ...]}
                 
                 if processed >= world_size:
-                    ci, _, output_latents, current_start_o, current_end_o, _, _ = receive_latents_async(rank, device, free_buffers, free_buffers_origin)
-                    pipeline.hidden_states = output_latents
-                    pipeline.kv_cache_starts[0] = current_start_o
-                    pipeline.kv_cache_ends[0] = current_end_o
+                    ci, _, output_latents, current_start_o, current_end_o, _, _ = receive_latents_async(rank, num_steps, device, free_buffers, free_buffers_origin)
 
             torch.cuda.current_stream().wait_stream(com_stream)
 
@@ -308,7 +311,12 @@ def main():
                     raise Exception(f"Error waiting for outstanding chunks {start_idx}")
 
             with torch.cuda.stream(com_stream):
-                send_latents_fn(start_idx, denoised_pred, noisy_latents, patched_x_shape, current_start, current_end, current_step, device, rank, outstanding)
+                send_latents_fn(start_idx, denoised_pred, pipeline.hidden_states, patched_x_shape, pipeline.kv_cache_starts, pipeline.kv_cache_ends, current_step, device, rank, outstanding)
+            
+            if processed >= world_size:
+                pipeline.hidden_states = output_latents
+                pipeline.kv_cache_starts.copy_(current_start_o)
+                pipeline.kv_cache_ends.copy_(current_end_o)
 
             torch.cuda.synchronize()
             end_time = time.time()
@@ -333,7 +341,7 @@ def main():
             end_idx = end_idx+chunck_size
 
             with torch.cuda.stream(com_stream):
-                ci, latents, latents_origin, current_start, current_end, current_step, patched_x_shape = receive_latents_async(rank, device, free_buffers, free_buffers_origin)
+                ci, latents, latents_origin, current_start, current_end, current_step, patched_x_shape = receive_latents_async(rank, num_steps, device, free_buffers, free_buffers_origin)
             torch.cuda.current_stream().wait_stream(com_stream)
 
             shape = tuple(latents.shape)
@@ -366,7 +374,7 @@ def main():
             with torch.cuda.stream(com_stream):
                 send_latents_fn(start_idx, latents, denoised_pred, patched_x_shape, current_start, current_end, current_step, device, rank, outstanding)
 
-            if processed >= num_steps:
+            if processed >= num_steps * 2 - 1:
                 video = pipeline.vae.stream_decode_to_pixel(denoised_pred[[-1]])
                 video = (video * 0.5 + 0.5).clamp(0, 1)
                 video = video[0].permute(0, 2, 3, 1).contiguous()
