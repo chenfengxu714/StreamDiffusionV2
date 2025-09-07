@@ -608,7 +608,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             patched_x_shape = torch.tensor([bsz, cch, tlen, hh, ww], dtype=torch.int64, device=device)
         else:
             bsz, cch, tlen, hh, ww = [int(i) for i in patched_x_shape.tolist()]
-            x = [x.permute(0,2,1).reshape(bsz, cch, tlen, hh, ww)]
+            x = [u.permute(1,0).reshape(bsz, cch, tlen, hh, ww) for u in x]
             
         grid_sizes = torch.stack(
             [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])

@@ -252,7 +252,7 @@ class WanDiffusionWrapper(DiffusionModelInterface):
         if len(noisy_image_or_video.shape) == 5:
             noisy_image_or_video = noisy_image_or_video.permute(0, 2, 1, 3, 4)
 
-        output = self.model(
+        output, patched_x_shape = self.model(
             noisy_image_or_video,
             t=input_timestep, context=prompt_embeds,
             seq_len=self.seq_len,
@@ -265,7 +265,7 @@ class WanDiffusionWrapper(DiffusionModelInterface):
             patched_x_shape=patched_x_shape,
         )
 
-        return output
+        return output, patched_x_shape
 
     def forward_output(
         self, noisy_image_or_video: torch.Tensor, conditional_dict: dict,

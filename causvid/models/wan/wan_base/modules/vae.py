@@ -1,10 +1,10 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import logging
+
 import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
 from einops import rearrange
 
 __all__ = [
@@ -365,48 +365,6 @@ class Encoder3d(nn.Module):
                 x = layer(x)
         return x
 
-def gather_video_2x2_dist(x, rank, world_size):
-    x = x.contiguous()
-    device = x.device
-
-    # Prepare gather list on rank 0
-    if rank == 0:
-        gather_list = [torch.empty_like(x, device=device) for _ in range(world_size)]
-    else:
-        gather_list = None
-
-    # Gather all chunks to rank 0
-    # dist.barrier()
-    dist.gather(x, gather_list=gather_list, dst=0)
-
-    if rank != 0:
-        # Wait until rank 0 finishes processing
-        return x
-
-    # ===== Reassemble full video on rank 0 =====
-    B, C, T, H_half, W_half = gather_list[0].shape
-    H_full = H_half * 2
-    W_full = W_half * 2
-
-    full_video = torch.empty((B, C, T, H_full, W_full),
-                             device=device, dtype=x.dtype)
-
-    for r, part in enumerate(gather_list):
-        row_off = r // 2  # 0 or 1
-        col_off = r % 2   # 0 or 1
-        full_video[:, :, :, row_off::2, col_off::2] = part
-
-    return full_video
-
-def gather_video_2x2(video):
-    B4, C, T, H_half, W_half = video.shape
-    assert B4 % 4 == 0
-
-    video = video.view(B4//4, 2, 2, C, T, H_half, W_half)  # (B, 2, 2, C, T, H//2, W//2)
-    video = video.permute(0, 3, 4, 5, 1, 6, 2)  # (B, C, T, H//2, 2, W//2, 2)
-    video = video.contiguous().view(B4//4, C, T, H_half * 2, W_half * 2)  # (B, C, T, H, W)
-
-    return video
 
 class Decoder3d(nn.Module):
 
@@ -461,8 +419,6 @@ class Decoder3d(nn.Module):
         self.head = nn.Sequential(
             RMS_norm(out_dim, images=False), nn.SiLU(),
             CausalConv3d(out_dim, 3, 3, padding=1))
-        
-        self.tuning = False
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         # conv1
@@ -489,16 +445,8 @@ class Decoder3d(nn.Module):
             else:
                 x = layer(x)
 
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        rank = dist.get_rank() if dist.is_initialized() else 0
-
         # upsamples
-        for i, layer in enumerate(self.upsamples):
-            if i == len(self.upsamples) - 1 and world_size > 1:
-                if self.tuning:
-                    x = gather_video_2x2(x, rank, world_size)
-                else:
-                    x = gather_video_2x2_dist(x)
+        for layer in self.upsamples:
             if feat_cache is not None:
                 x = layer(x, feat_cache, feat_idx)
             else:
@@ -599,8 +547,8 @@ class WanVAE_(nn.Module):
         # cache
         t = x.shape[2]
         if self.first_encode:
-            self.clear_cache_encode()
             self.first_encode = False
+            self.clear_cache_encode()
             self._enc_conv_idx = [0]
             out = self.encoder(
                 x[:, :, :1, :, :],
@@ -664,8 +612,9 @@ class WanVAE_(nn.Module):
             z = z / scale[1] + scale[0]
         x = self.conv2(z)
         if self.first_decode:
-            self.clear_cache_decode()
             self.first_decode = False
+            self.clear_cache_decode()
+            self.first_batch = False
             self._conv_idx = [0]
             out = self.decoder(
                 x[:, :, :1, :, :],
