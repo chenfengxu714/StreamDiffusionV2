@@ -16,8 +16,8 @@ from diffusers.models.modeling_utils import ModelMixin
 import torch.nn as nn
 import torch
 import math
-import torch.distributed as dist
-import time
+from flash_attn import flash_attn_interface
+
 # wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
 # see https://github.com/pytorch/pytorch/issues/133254
 # change to default for other models
@@ -184,7 +184,7 @@ class CausalWanSelfAttention(nn.Module):
                 kv_cache["local_end_index"].fill_(local_end_index)
 
             else:
-                output_x = []
+                seq_lens = []
                 for i, c_start in enumerate(current_start):
                     current_end = c_start + roped_query.shape[1]
                     sink_tokens = self.sink_size * frame_seqlen
@@ -212,16 +212,18 @@ class CausalWanSelfAttention(nn.Module):
                     kv_cache["k"][i:i+1, local_start_index:local_end_index] = roped_key[i:i+1]
                     kv_cache["v"][i:i+1, local_start_index:local_end_index] = v[i:i+1]
 
-                    output_x.append(attention(
-                        roped_query[i:i+1],
-                        kv_cache["k"][i:i+1, :local_end_index],
-                        kv_cache["v"][i:i+1, :local_end_index]
-                    ))
+                    seq_lens.append(local_end_index)
 
                     kv_cache["global_end_index"][i].fill_(current_end)
                     kv_cache["local_end_index"][i].fill_(local_end_index)
-
-                x = torch.cat(output_x, dim=0)
+                
+                seq_lens = torch.tensor(seq_lens, dtype=torch.int32, device=roped_query.device)
+                x = flash_attn_interface.flash_attn_with_kvcache(
+                    q=roped_query,
+                    k_cache=kv_cache["k"][:, :seq_lens.max()],
+                    v_cache=kv_cache["v"][:, :seq_lens.max()],
+                    cache_seqlens=seq_lens,
+                )
 
         # output
         x = x.flatten(2)

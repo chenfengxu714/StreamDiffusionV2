@@ -238,6 +238,7 @@ class WanDiffusionWrapper(DiffusionModelInterface):
         current_start: Optional[int] = None,
         current_end: Optional[int] = None,
         patched_x_shape: torch.Tensor = None,
+        block_x: torch.Tensor = None,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache must be provided"
 
@@ -249,7 +250,9 @@ class WanDiffusionWrapper(DiffusionModelInterface):
         else:
             input_timestep = timestep
         
-        if len(noisy_image_or_video.shape) == 5:
+        if block_x is not None and block_mode == 'middle':
+            noisy_image_or_video = block_x
+        else:
             noisy_image_or_video = noisy_image_or_video.permute(0, 2, 1, 3, 4)
 
         output, patched_x_shape = self.model(
