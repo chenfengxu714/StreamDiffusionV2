@@ -137,7 +137,6 @@ def init_distributed():
         backend = "nccl"
         dist.init_process_group(backend=backend)
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str)
@@ -174,7 +173,6 @@ def main():
     for k, v in vars(args).items():
         config[k] = v
 
-    # Rank 0 读取原始视频
     if rank == 0:
         input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
         if input_video_original.dtype != torch.bfloat16:
@@ -220,17 +218,20 @@ def main():
             chunk_meta.append((start_idx, end_idx, current_start, current_end))
     
     total_block_num = []
-    total_blocks = 29
+    total_blocks = 30
     if world_size == 2:
-        total_block_num = [[24], [24]]
+        # New interval format: [start, end), so [0,15] and [15,30]
+        total_block_num = [[0, 15], [15, total_blocks]]
     else:
-        total_block_num.append([0])
-        num_middle = world_size - 2
-        for i in range(num_middle):
-            start = int(i * total_blocks // num_middle)
-            end = int((i + 1) * total_blocks // num_middle)
+        # Evenly split [0, total_blocks) into world_size contiguous intervals
+        base = total_blocks // world_size
+        rem = total_blocks % world_size
+        start = 0
+        for r in range(world_size):
+            size = base + (1 if r < rem else 0)
+            end = start + size if r < world_size - 1 else total_blocks
             total_block_num.append([start, end])
-        total_block_num.append([total_blocks])
+            start = end
 
     block_num = total_block_num[rank]
 
@@ -359,7 +360,7 @@ def main():
             start_time = end_time
 
         # wait receiver thread to exit cleanly (should have finished num_chuncks)
-        rcv_thread.join(timeout=5.0)
+        rcv_thread.join(timeout=1.0)
 
         video_list = [results[i] for i in range(num_chuncks)]
         video = np.concatenate(video_list, axis=0)
@@ -432,7 +433,6 @@ def main():
             t = end_time - start_time
             print(f"[rank {rank}] Encode time: {t:.4f} s, fps: {chunck_size/t:.4f}")
             start_time = end_time
-
 
     dist.barrier()
 

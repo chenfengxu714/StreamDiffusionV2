@@ -652,8 +652,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 assert False
             else:
-                if (block_mode == 'output' or block_mode == 'middle') and block_index <= block_num[0]:
+                if (block_mode == 'output' or block_mode == 'middle') and block_index < block_num[0]:
                     continue
+                if (block_mode == 'input' or block_mode == 'middle') and block_index == block_num[-1]:
+                    return x, patched_x_shape
                 kwargs.update(
                     {
                         "kv_cache": kv_cache[block_index],
@@ -663,8 +665,6 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     }
                 )
                 x = block(x, **kwargs)
-                if (block_mode == 'input' or block_mode == 'middle') and block_index == block_num[-1]:
-                    return x, patched_x_shape
 
         # head
         x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))

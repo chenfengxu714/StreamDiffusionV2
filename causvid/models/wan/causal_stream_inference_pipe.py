@@ -163,7 +163,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                         block_mode=block_mode,
                         block_num=block_num,
                         patched_x_shape=patched_x_shape,
-                        block_x=block_x
+                        block_x=block_x,
                     )
                 else:
                     denoised_pred = self.generator.forward_input(
@@ -176,7 +176,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                         current_end=current_end,
                         block_mode=block_mode,
                         block_num=block_num,
-                        patched_x_shape=patched_x_shape
+                        patched_x_shape=patched_x_shape,
+                        block_x=block_x,
                     ) 
 
         return denoised_pred

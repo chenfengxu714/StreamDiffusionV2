@@ -175,10 +175,13 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.hidden_states = torch.zeros(
             (self.batch_size, self.num_frame_per_block, *noise.shape[2:]), dtype=noise.dtype, device=device
         )
-        if block_mode == 'output':
+
+        if block_mode in ['output', 'middle']:
             self.block_x = torch.zeros(
                 (self.batch_size, self.frame_seq_length, 1536), dtype=noise.dtype, device=device
             )
+        else:
+            self.block_x = None
 
         self.kv_cache_starts = torch.ones(self.batch_size, dtype=torch.long, device=device) * current_end
         self.kv_cache_ends = torch.ones(self.batch_size, dtype=torch.long, device=device) * current_end + self.frame_seq_length
@@ -207,6 +210,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.hidden_states.copy_(noise)
             self.kv_cache_starts.copy_(current_start)
             self.kv_cache_ends.copy_(current_end)
+        
+        self.timestep[0] = current_step
         
         if block_mode == 'output':
             denoised_pred = self.generator.forward_output(
@@ -244,7 +249,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 current_end=self.kv_cache_ends,
                 block_mode=block_mode,
                 block_num=block_num,
-                patched_x_shape=patched_x_shape
+                patched_x_shape=patched_x_shape,
+                block_x=self.block_x,
             ) 
 
         return denoised_pred, patched_x_shape
