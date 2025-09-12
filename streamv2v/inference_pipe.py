@@ -138,7 +138,7 @@ class InferencePipelineManager:
         self.t_dit = 100.0
         self.t_total = 100.0
         self.processed = 0
-        self.schedule_step = 5
+        self.schedule_step = 4 + len(config.denoising_step_list)
         
         self.logger.info(f"Initialized InferencePipelineManager for rank {rank}")
     
@@ -316,6 +316,8 @@ class InferencePipelineManager:
             if schedule_block:
                 torch.cuda.synchronize()
                 start_dit = time.time()
+            if save_results == num_chuncks-1:
+                break
             
             # Run inference
             denoised_pred, _ = self.pipeline.inference(
@@ -384,7 +386,7 @@ class InferencePipelineManager:
                     self._handle_block_scheduling(block_num, total_blocks)
         
         # Save final video
-        video_list = [results[i] for i in range(num_chuncks)]
+        video_list = [results[i] for i in range(num_chuncks-1)]
         video = np.concatenate(video_list, axis=0)
         self.logger.info(f"Video shape: {video.shape}")
         

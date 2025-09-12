@@ -67,7 +67,6 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 "k": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
                 "v": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
                 "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                "local_end_index": torch.tensor([0], dtype=torch.long, device=device)
             })
 
         self.kv_cache1 = kv_cache1  # always store the clean cache
@@ -117,6 +116,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
     def inference(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
         batch_size = noise.shape[0]
+        current_start = torch.tensor([current_start])
+        current_end = torch.tensor([current_end])
         
         # Step 2.1: Spatial denoising loop
         self.denoising_step_list[0]=current_step

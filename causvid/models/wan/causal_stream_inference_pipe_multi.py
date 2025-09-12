@@ -119,6 +119,9 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             # reset cross attn cache
             for block_index in range(self.num_transformer_blocks):
                 self.crossattn_cache[block_index]["is_init"] = False
+        
+        current_start = torch.tensor([current_start], dtype=torch.long, device=device)
+        current_end = torch.tensor([current_end], dtype=torch.long, device=device)
 
         for index, current_timestep in enumerate(self.denoising_step_list):
             # set current timestep
