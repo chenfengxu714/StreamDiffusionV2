@@ -1,4 +1,11 @@
-from causvid.models.wan.causal_stream_inference_pipe import CausalStreamInferencePipeline
+"""
+Refactored multi-rank inference pipeline with communication abstractions.
+
+This is a refactored version of inference_pipe_multi.py that uses the new
+communication abstraction layers for better code organization and maintainability.
+"""
+
+from causvid.models.wan.causal_stream_inference_pipe_multi import CausalStreamInferencePipeline
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
 from omegaconf import OmegaConf
@@ -9,20 +16,24 @@ import torch.multiprocessing as mp
 import os
 import time
 import numpy as np
+import logging
 
 import torchvision
 import torchvision.transforms.functional as TF
 from einops import rearrange
 
-import queue
-import threading
+# Import our new communication abstractions
+from streamv2v.communication import (
+    DistributedCommunicator,
+    ModelDataTransfer,
+    BufferManager,
+    KVCacheManager,
+    CommunicationConfig,
+    init_distributed,
+    setup_logging,
+    compute_balanced_split
+)
 
-TAG_LATENT_HDR = 11001
-TAG_LATENT_PAY = 11002
-TAG_START_END_STEP = 11003
-TAG_PATCHED_X_SHAPE = 11004
-TAG_LATENT_ORIGIN_HDR = 11005
-TAG_LATENT_ORIGIN_PAY = 11006
 
 def load_mp4_as_tensor(
     video_path: str,
@@ -62,82 +73,435 @@ def load_mp4_as_tensor(
 
     return video  # [C, T, H, W]
 
-def send_latents_fn(i, latents, original_latents, patched_x_shape, current_start, current_end, current_step, device, rank, outstanding):
-    # build header on GPU (NCCL requires GPU tensors for send/recv)
-    bsz, slen, cch = latents.shape
-    header = torch.tensor([i, bsz, slen, cch], dtype=torch.int64, device=device)
 
-    bsz, cch, tlen, hh, ww = original_latents.shape
-    header_origin = torch.tensor([i, bsz, cch, tlen, hh, ww], dtype=torch.int64, device=device)
+def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: int, chunck_size: int, noise_scale: float):
+    """Compute adaptive noise scale and current step based on video content."""
+    l2_dist=(input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
+    l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
+    new_noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
+    current_step = int(1000*new_noise_scale)-100
+    return new_noise_scale, current_step
 
-    # non-blocking sends
-    work_h = dist.isend(header, dst=rank+1, tag=TAG_LATENT_HDR)
-    work_p = dist.isend(latents, dst=rank+1, tag=TAG_LATENT_PAY)
-    work_h_0 = dist.isend(header_origin, dst=rank+1, tag=TAG_LATENT_ORIGIN_HDR)
-    work_p_0 = dist.isend(original_latents, dst=rank+1, tag=TAG_LATENT_ORIGIN_PAY)
-    work_shape = dist.isend(patched_x_shape, dst=rank+1, tag=TAG_PATCHED_X_SHAPE)
-    work_s = dist.isend(torch.tensor([current_start, current_end, current_step], dtype=torch.int64, device=device), dst=rank+1, tag=TAG_START_END_STEP)
 
-    # keep references until send completes
-    outstanding.append((work_h, work_p, work_h_0, work_p_0, work_shape, work_s))
+class InferencePipelineManager:
+    """
+    Manages the inference pipeline with communication abstractions.
+    
+    This class encapsulates the main inference logic and uses the communication
+    abstractions for distributed operations.
+    """
+    
+    def __init__(self, config, device: torch.device, rank: int, world_size: int):
+        """
+        Initialize the inference pipeline manager.
+        
+        Args:
+            config: Configuration object
+            device: GPU device
+            rank: Current rank
+            world_size: Total number of ranks
+        """
+        self.config = config
+        self.device = device
+        self.rank = rank
+        self.world_size = world_size
+        
+        # Setup logging
+        self.logger = setup_logging(rank)
+        
+        # Initialize communication components
+        comm_config = CommunicationConfig(
+            max_outstanding=config.get('max_outstanding', 1),
+            buffer_pool_size=config.get('buffer_pool_size', 10),
+            enable_buffer_reuse=config.get('enable_buffer_reuse', True)
+        )
+        
+        self.communicator = DistributedCommunicator(rank, world_size, device, comm_config)
+        self.buffer_manager = BufferManager(device, comm_config)
+        
+        # Initialize pipeline
+        self.pipeline = CausalStreamInferencePipeline(config, device=str(device))
+        self.pipeline.to(device=str(device), dtype=torch.bfloat16)
+        
+        # Initialize KV cache manager
+        self.kv_cache_manager = KVCacheManager(self.pipeline, device)
+        
+        # Initialize model data transfer
+        self.data_transfer = ModelDataTransfer(
+            self.communicator, 
+            self.buffer_manager, 
+            self.kv_cache_manager, 
+            comm_config
+        )
+        
+        # Performance tracking
+        self.t_dit = 100.0
+        self.t_total = 100.0
+        self.processed = 0
+        self.schedule_step = 5
+        
+        self.logger.info(f"Initialized InferencePipelineManager for rank {rank}")
+    
+    def load_model(self, checkpoint_folder: str):
+        """Load the model from checkpoint."""
+        state_dict = torch.load(os.path.join(checkpoint_folder, "model.pt"), map_location="cpu")["generator"]
+        self.pipeline.generator.load_state_dict(state_dict, strict=True)
+        self.logger.info("Model loaded successfully")
+    
+    def prepare_pipeline(self, text_prompts: list, noise: torch.Tensor, 
+                        block_mode: str, current_start: int, current_end: int):
+        """Prepare the pipeline for inference."""
+        denoised_pred = self.pipeline.prepare(
+            text_prompts=text_prompts, 
+            device=self.device, 
+            dtype=torch.bfloat16, 
+            noise=noise, 
+            block_mode=block_mode, 
+            current_start=current_start, 
+            current_end=current_end
+        )
+        
+        # Broadcast the prepared result from rank 0
+        self.data_transfer.broadcast_tensor(denoised_pred, src=0)
+        return denoised_pred
+    
+    def run_rank_0_loop(self, input_video_original: torch.Tensor, prompts: list, 
+                       num_chuncks: int, num_steps: int, chunck_size: int,
+                       block_num: torch.Tensor, noise_scale: float, 
+                       schedule_block: bool, total_blocks: int):
+        """
+        Run the main loop for rank 0 (encoder + async send).
+        
+        This method encapsulates the rank 0 logic using the communication abstractions.
+        """
+        self.logger.info("Starting rank 0 inference loop")
+        
+        # Initialize variables
+        start_idx = 0
+        end_idx = 5
+        current_start = 0
+        current_end = self.pipeline.frame_seq_length * 2
+        
+        com_stream = torch.cuda.Stream()
+        outstanding = []
+        
+        torch.cuda.synchronize()
+        start_time = time.time()
+        
+        while True:
+            # Process new chunk if available
+            start_idx = end_idx
+            end_idx = end_idx + chunck_size
+            current_start = current_end
+            current_end = current_end + (chunck_size // 4) * self.pipeline.frame_seq_length
+                
+            if end_idx <= input_video_original.shape[2]:
+                inp = input_video_original[:, :, start_idx:end_idx]
+                
+                noise_scale, current_step = compute_noise_scale_and_step(
+                    input_video_original, end_idx, chunck_size, noise_scale
+                )
+                
+                latents = self.pipeline.vae.model.stream_encode(inp)
+                latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
+                
+                noise = torch.randn_like(latents)
+                noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
+            
+            # Measure DiT time if scheduling is enabled
+            if schedule_block:
+                torch.cuda.synchronize()
+                start_dit = time.time()
+            
+            # Run inference
+            denoised_pred, patched_x_shape = self.pipeline.inference(
+                noise=noisy_latents,
+                current_start=current_start,
+                current_end=current_end,
+                current_step=current_step,
+                block_mode='input',
+                block_num=block_num[self.rank],
+            )
+            
+            # Update DiT timing
+            if schedule_block:
+                torch.cuda.synchronize()
+                temp = time.time() - start_dit
+                if temp < self.t_dit:
+                    self.t_dit = temp
+            
+            self.processed += 1
+            
+            # Handle communication
+            with torch.cuda.stream(com_stream):
+                if self.processed == self.world_size:
+                    # Initialize buffer pools
+                    pass
+                
+                if self.processed >= self.world_size:
+                    # Receive data from previous rank
+                    latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+            
+            torch.cuda.current_stream().wait_stream(com_stream)
+            
+            # Wait for outstanding operations
+            while len(outstanding) >= self.config.get('max_outstanding', 1):
+                oldest = outstanding.pop(0)
+                for work in oldest:
+                    work.wait()
+            
+            # Send data to next rank
+            with torch.cuda.stream(com_stream):
+                work_objects = self.data_transfer.send_latent_data_async(
+                    chunk_idx=start_idx,
+                    latents=denoised_pred,
+                    original_latents=self.pipeline.hidden_states,
+                    patched_x_shape=patched_x_shape,
+                    current_start=self.pipeline.kv_cache_starts,
+                    current_end=self.pipeline.kv_cache_ends,
+                    current_step=current_step
+                )
+                outstanding.append(work_objects)
 
-def receiver_thread_fn(rank, num_chuncks, device, free_buffers, free_buffers_origin, decode_queue, receiver_stop):
-    for _ in range(num_chuncks):
-        # receive header first (on GPU)
-        lhdr = torch.empty(4, dtype=torch.int64, device=device)
-        dist.recv(lhdr, src=rank-1, tag=TAG_LATENT_HDR)
+            if self.processed >= self.world_size:
+                self.pipeline.hidden_states = latent_data.original_latents
+                self.pipeline.kv_cache_starts.copy_(latent_data.current_start)
+                self.pipeline.kv_cache_ends.copy_(latent_data.current_end)
+            
+            # Handle block scheduling
+            if schedule_block and self.processed == self.schedule_step:
+                self._handle_block_scheduling(block_num, total_blocks)
+            
+            # Update timing and check completion
+            torch.cuda.synchronize()
+            end_time = time.time()
+            t = end_time - start_time
+            self.logger.info(f"Encode {self.processed}, time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
+            
+            if t < self.t_total:
+                self.t_total = t
+            
+            start_time = end_time
+            if self.processed == num_chuncks + (num_steps - 1) * self.world_size:
+                break
+        
+        self.logger.info("Rank 0 inference loop completed")
+    
+    def run_final_rank_loop(self, num_chuncks: int, num_steps: int, chunck_size: int,
+                           block_num: torch.Tensor, output_folder: str, fps: int,
+                           schedule_block: bool, total_blocks: int, results: dict):
+        """
+        Run the main loop for the final rank (async receiver + decode).
+        
+        This method encapsulates the final rank logic using the communication abstractions.
+        """
+        self.logger.info("Starting final rank inference loop")
+        
+        os.makedirs(output_folder, exist_ok=True)
+        save_results = 1
+        
+        com_stream = torch.cuda.Stream()
+        outstanding = []
+        
+        torch.cuda.synchronize()
+        start_time = time.time()
+        
+        while save_results < num_chuncks:
+            # Receive data from previous rank
+            with torch.cuda.stream(com_stream):
+                latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+            torch.cuda.current_stream().wait_stream(com_stream)
+            
+            # Measure DiT time if scheduling is enabled
+            if schedule_block:
+                torch.cuda.synchronize()
+                start_dit = time.time()
+            
+            # Run inference
+            denoised_pred, _ = self.pipeline.inference(
+                noise=latent_data.original_latents,
+                current_start=latent_data.current_start,
+                current_end=latent_data.current_end,
+                current_step=latent_data.current_step,
+                block_mode='output',
+                block_num=block_num[self.rank],
+                patched_x_shape=latent_data.patched_x_shape,
+                block_x=latent_data.latents,
+            )
+            
+            # Update DiT timing
+            if schedule_block:
+                torch.cuda.synchronize()
+                temp = time.time() - start_dit
+                if temp < self.t_dit:
+                    self.t_dit = temp
+            
+            self.processed += 1
+            
+            # Wait for outstanding operations
+            while len(outstanding) >= self.config.get('max_outstanding', 1):
+                oldest = outstanding.pop(0)
+                for work in oldest:
+                    work.wait()
+            
+            # Send data to next rank (if not the last rank)
+            with torch.cuda.stream(com_stream):
+                work_objects = self.data_transfer.send_latent_data_async(
+                    chunk_idx=latent_data.chunk_idx,
+                    latents=latent_data.latents,
+                    original_latents=denoised_pred,
+                    patched_x_shape=latent_data.patched_x_shape,
+                    current_start=latent_data.current_start,
+                    current_end=latent_data.current_end,
+                    current_step=latent_data.current_step
+                )
+                outstanding.append(work_objects)
+            
+            # Decode and save video
+            if self.processed >= num_steps * 2:
+                video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred[[-1]])
+                video = (video * 0.5 + 0.5).clamp(0, 1)
+                video = video[0].permute(0, 2, 3, 1).contiguous()
+                
+                results[save_results] = video.cpu().float().numpy()
+                
+                # Return buffer to pool
+                self.buffer_manager.return_buffer(latent_data.latents, "latent")
+                
+                torch.cuda.synchronize()
+                end_time = time.time()
+                t = end_time - start_time
+                self.logger.info(f"Decode {self.processed}, time: {t:.4f} s, fps: {video.shape[0]/t:.4f}")
+                
+                if t < self.t_total:
+                    self.t_total = t
+                
+                save_results += 1
+                start_time = end_time
+                
+                # Handle block scheduling
+                if schedule_block and self.processed == self.schedule_step:
+                    self._handle_block_scheduling(block_num, total_blocks)
+        
+        # Save final video
+        video_list = [results[i] for i in range(num_chuncks)]
+        video = np.concatenate(video_list, axis=0)
+        self.logger.info(f"Video shape: {video.shape}")
+        
+        output_path = os.path.join(output_folder, f"output_{0:03d}.mp4")
+        export_to_video(video, output_path, fps=fps)
+        self.logger.info(f"Video saved to: {output_path}")
+    
+    def run_middle_rank_loop(self, num_chuncks: int, num_steps: int, chunck_size: int,
+                            block_num: torch.Tensor, schedule_block: bool, total_blocks: int):
+        """
+        Run the main loop for middle ranks (async receiver + dit blocks + sender).
+        
+        This method encapsulates the middle rank logic using the communication abstractions.
+        """
+        self.logger.info("Starting middle rank inference loop")
+        
+        com_stream = torch.cuda.Stream()
+        outstanding = []
+        
+        torch.cuda.synchronize()
+        start_time = time.time()
+        
+        while self.processed < num_chuncks + num_steps + self.world_size:
+            # Receive data from previous rank
+            with torch.cuda.stream(com_stream):
+                latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+            torch.cuda.current_stream().wait_stream(com_stream)
+            
+            # Run inference
+            denoised_pred, _ = self.pipeline.inference(
+                noise=latent_data.original_latents,
+                current_start=latent_data.current_start,
+                current_end=latent_data.current_end,
+                current_step=latent_data.current_step,
+                block_mode='middle',
+                block_num=block_num[self.rank],
+                patched_x_shape=latent_data.patched_x_shape,
+                block_x=latent_data.latents,
+            )
+            
+            self.processed += 1
+            
+            # Wait for outstanding operations
+            while len(outstanding) >= self.config.get('max_outstanding', 1):
+                oldest = outstanding.pop(0)
+                for work in oldest:
+                    work.wait()
+            
+            # Send data to next rank
+            with torch.cuda.stream(com_stream):
+                work_objects = self.data_transfer.send_latent_data_async(
+                    chunk_idx=latent_data.chunk_idx,
+                    latents=denoised_pred,
+                    original_latents=latent_data.original_latents,
+                    patched_x_shape=latent_data.patched_x_shape,
+                    current_start=latent_data.current_start,
+                    current_end=latent_data.current_end,
+                    current_step=latent_data.current_step
+                )
+                outstanding.append(work_objects)
+            
+            # Update timing
+            torch.cuda.synchronize()
+            end_time = time.time()
+            t = end_time - start_time
+            if t < self.t_total:
+                self.t_total = t
+            
+            self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, fps: {chunck_size/t:.4f}")
+            start_time = end_time
+        
+        self.logger.info("Middle rank inference loop completed")
+    
+    def _handle_block_scheduling(self, block_num: torch.Tensor, total_blocks: int):
+        """Handle block scheduling and rebalancing."""
+        self.logger.info(f"Scheduling block in {self.processed}")
+        
+        # Gather timing information from all ranks
+        t_total_tensor = torch.tensor(self.t_total, dtype=torch.float32, device=self.device)
+        t_dit_tensor = torch.tensor(self.t_dit, dtype=torch.float32, device=self.device)
+        
+        gather_blocks = [torch.zeros_like(t_dit_tensor, dtype=torch.float32, device=self.device) 
+                        for _ in range(self.world_size)]
+        
+        dist.all_gather(gather_blocks, t_dit_tensor)
+        t_dit_list = [t_dit_i.item() for t_dit_i in gather_blocks]
+        
+        dist.all_gather(gather_blocks, t_total_tensor)
+        t_list = [t_i.item() for t_i in gather_blocks]
+        
+        # Compute new block distribution
+        new_block_num = torch.tensor(
+            compute_balanced_split(total_blocks, t_list, t_dit_list, block_num.tolist()),
+            dtype=torch.int64, device=self.device
+        )
 
-        ci, bsz, slen, cch = [int(x) for x in lhdr.tolist()]
-        shape = (bsz, slen, cch)
+        self.logger.info(f"New block distribution: {new_block_num[self.rank].tolist()}")
+        
+        # Broadcast new block distribution
+        dist.broadcast(new_block_num, src=self.world_size - 1)
+        
+        # Rebalance KV cache
+        self.data_transfer.rebalance_kv_cache(block_num, new_block_num, total_blocks)
+        
+        # Update block_num
+        block_num.copy_(new_block_num)
+        
+        self.logger.info("Block scheduling completed")
+    
+    def cleanup(self):
+        """Clean up resources."""
+        self.data_transfer.cleanup()
+        self.logger.info("InferencePipelineManager cleanup completed")
 
-        # get or allocate buffer (reuse if possible)
-        buf = None
-        if shape in free_buffers and len(free_buffers[shape]) > 0:
-            buf = free_buffers[shape].pop()
-        else:
-            # allocate new on GPU with same dtype as sent
-            buf = torch.empty(shape, dtype=torch.bfloat16, device=device)
-
-        # blocking recv into buf
-        dist.recv(buf, src=rank-1, tag=TAG_LATENT_PAY)
-
-        # receive header first (on GPU)
-        lhdr = torch.empty(6, dtype=torch.int64, device=device)
-        dist.recv(lhdr, src=rank-1, tag=TAG_LATENT_ORIGIN_HDR)
-
-        ci, bsz, cch, tlen, hh, ww = [int(x) for x in lhdr.tolist()]
-        shape = (bsz, cch, tlen, hh, ww)
-
-        # get or allocate buffer (reuse if possible)
-        buf_0 = None
-        if shape in free_buffers_origin and len(free_buffers_origin[shape]) > 0:
-            buf_0 = free_buffers_origin[shape].pop()
-        else:
-            # allocate new on GPU with same dtype as sent
-            buf_0 = torch.empty(shape, dtype=torch.bfloat16, device=device)
-
-        # blocking recv into buf
-        dist.recv(buf_0, src=rank-1, tag=TAG_LATENT_ORIGIN_PAY)
-
-        patched_x_shape = torch.empty(5, dtype=torch.int64, device=device)
-        start_end_step = torch.empty(3, dtype=torch.int64, device=device)
-        dist.recv(patched_x_shape, src=rank-1, tag=TAG_PATCHED_X_SHAPE)
-
-        dist.recv(start_end_step, src=rank-1, tag=TAG_START_END_STEP)
-        current_start, current_end, current_step = [int(x) for x in start_end_step.tolist()]
-
-        # put into decode queue (this will block if decode queue is full)
-        decode_queue.put((ci, buf, buf_0, current_start, current_end, current_step, patched_x_shape))
-
-    # received all expected chunks -> signal done
-    receiver_stop.set()
-
-def init_distributed():
-    if not dist.is_initialized():
-        backend = "nccl"
-        dist.init_process_group(backend=backend)
 
 def main():
+    """Main function for the refactored inference pipeline."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str)
     parser.add_argument("--checkpoint_folder", type=str)
@@ -149,40 +513,41 @@ def main():
     parser.add_argument("--width", type=int, default=832)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--fold", action="store_true", default=False)
-    parser.add_argument("--max_outstanding", type=int, default=2, help="max number of outstanding sends/recv to keep")
+    parser.add_argument("--max_outstanding", type=int, default=1, help="max number of outstanding sends/recv to keep")
     parser.add_argument("--dit_fsdp", action="store_true", default=False)
     parser.add_argument("--t5_fsdp", action="store_true", default=False)
     parser.add_argument("--ulysses_size", type=int, default=1)
     parser.add_argument("--ring_size", type=int, default=1)
-
+    parser.add_argument("--schedule_block", action="store_true", default=False)
+    
     args = parser.parse_args()
-
+    
     torch.set_grad_enabled(False)
     init_distributed()
-
+    
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
-
+    
     assert world_size >= 2, "world_size must be at least 2"
-
+    
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
-
+    
+    # Load configuration
     config = OmegaConf.load(args.config_path)
     for k, v in vars(args).items():
         config[k] = v
-
-    if rank == 0:
-        input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
-        if input_video_original.dtype != torch.bfloat16:
-            input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device)
-        print(f"Input video tensor shape: {input_video_original.shape}")
-        b, c, t, h, w = input_video_original.shape
-    else:
-        input_video_original = None
-        b = c = t = h = w = 0
-
+    
+    # Load input video
+    input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
+    if input_video_original.dtype != torch.bfloat16:
+        input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device)
+    
+    print(f"Input video tensor shape: {input_video_original.shape}")
+    b, c, t, h, w = input_video_original.shape
+    
+    # Calculate number of chunks
     chunck_size = 4
     if rank == 0:
         num_chuncks = (t - 1) // chunck_size
@@ -191,251 +556,96 @@ def main():
     num_chuncks_tensor = torch.tensor([num_chuncks], dtype=torch.int64, device=device)
     dist.broadcast(num_chuncks_tensor, src=0)
     num_chuncks = int(num_chuncks_tensor.item())
-
-    # Build pipeline (keep existing init style)
-    pipeline = CausalStreamInferencePipeline(config, device=str(device))
-    pipeline.to(device=str(device), dtype=torch.bfloat16)
-    state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")["generator"]
-    pipeline.generator.load_state_dict(state_dict, strict=True)
-
+    
+    # Initialize pipeline manager
+    pipeline_manager = InferencePipelineManager(config, device, rank, world_size)
+    pipeline_manager.load_model(args.checkpoint_folder)
+    
+    # Load prompts
     dataset = TextDataset(args.prompt_file_path)
     prompts = [dataset[0]]
-
-    # Precompute indices (rank0 only)
-    chunk_meta = []
-    if rank == 0:
-        for i in range(num_chuncks):
-            if i == 0:
-                start_idx = 0
-                end_idx = 5
-                current_start = 0
-                current_end = pipeline.frame_seq_length*2
-            else:
-                start_idx = chunk_meta[-1][1]
-                end_idx = start_idx + chunck_size
-                current_start = current_end
-                current_end = current_end+(chunck_size//4)*pipeline.frame_seq_length
-            chunk_meta.append((start_idx, end_idx, current_start, current_end))
+    num_steps = len(pipeline_manager.pipeline.denoising_step_list)
     
-    total_block_num = []
+    # Determine block mode and setup block distribution
+    if rank == 0:
+        block_mode = 'input'
+    elif rank == world_size - 1:
+        block_mode = 'output'
+    else:
+        block_mode = 'middle'
+    
+    # Setup block distribution
     total_blocks = 30
     if world_size == 2:
-        # New interval format: [start, end), so [0,15] and [15,30]
         total_block_num = [[0, 15], [15, total_blocks]]
     else:
-        # Evenly split [0, total_blocks) into world_size contiguous intervals
         base = total_blocks // world_size
         rem = total_blocks % world_size
         start = 0
+        total_block_num = []
         for r in range(world_size):
             size = base + (1 if r < rem else 0)
             end = start + size if r < world_size - 1 else total_blocks
             total_block_num.append([start, end])
             start = end
-
-    block_num = total_block_num[rank]
-
-    noise_scale = args.noise_scale
-    MAX_OUTSTANDING = args.max_outstanding
-
-    # ----- RANK 0: encoder + async send (isend) -----
-    if rank == 0:
-        prepared = False
-        outstanding = []  # list of (work_obj, work_obj2, latents_ref, header_ref)
-        torch.cuda.synchronize()
-        start_time = time.time()
-        for i, (start_idx, end_idx, current_start, current_end) in enumerate(chunk_meta):
-            inp = input_video_original[:, :, start_idx:end_idx]
-
-            l2_dist=(input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
-            l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-            noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
-            current_step = int(1000*noise_scale)-100
-            latents = pipeline.vae.model.stream_encode(inp)  # [B, 4, T, H//16, W//16] or so
-            latents = latents.transpose(2,1).contiguous().to(dtype=torch.bfloat16)
-
-            if not prepared:
-                pipeline.prepare(latents, text_prompts=prompts)
-                prepared = True
-
-            noise = torch.randn_like(latents)
-            noisy_latents = noise*noise_scale + latents*(1-noise_scale)
-            denoised_pred, patched_x_shape = pipeline.inference(
-                noise=noisy_latents, # [1, 4, 16, 16, 60]
-                current_start=current_start,
-                current_end=current_end,
-                current_step=current_step,
-                block_mode='input',
-                block_num=block_num,
-            )
-
-            while len(outstanding) >= MAX_OUTSTANDING:
-                oldest = outstanding.pop(0)
-                # wait for both header & payload to finish
-                try:
-                    oldest[0].wait()
-                    oldest[1].wait()
-                    oldest[2].wait()
-                    oldest[3].wait()
-                    oldest[4].wait()
-                    oldest[5].wait()
-                except Exception:
-                    raise Exception(f"Error waiting for outstanding chunks {i}")
-
-            send_latents_fn(i, denoised_pred, noisy_latents, patched_x_shape, current_start, current_end, current_step, device, rank, outstanding)
-
-            torch.cuda.synchronize()
-            end_time = time.time()
-            t = end_time - start_time
-            print(f"[rank 0] Encode time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
-            start_time = end_time
-
-        for (w_h, w_p, w_h_0, w_p_0, w_shape, w_s) in outstanding:
-            w_h.wait()
-            w_p.wait()
-            w_h_0.wait()
-            w_p_0.wait()
-            w_s.wait()
-            w_shape.wait()
-
-    # ----- RANK {world_size - 1}: receiver thread(s) + decode loop -----
-    elif rank == world_size - 1:
-        os.makedirs(args.output_folder, exist_ok=True)
-        prepared = False
+    
+    block_num = torch.tensor(total_block_num, dtype=torch.int64, device=device)
+    
+    # Prepare pipeline
+    start_idx = 0
+    end_idx = 5
+    current_start = 0
+    current_end = pipeline_manager.pipeline.frame_seq_length * 2
+    
+    inp = input_video_original[:, :, start_idx:end_idx]
+    latents = pipeline_manager.pipeline.vae.model.stream_encode(inp)
+    latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
+    noise = torch.randn_like(latents)
+    noisy_latents = noise * args.noise_scale + latents * (1 - args.noise_scale)
+    
+    dist.broadcast(noisy_latents, src=0)
+    
+    denoised_pred = pipeline_manager.prepare_pipeline(
+        text_prompts=prompts,
+        noise=noisy_latents,
+        block_mode=block_mode,
+        current_start=current_start,
+        current_end=current_end
+    )
+    
+    # Save initial result for final rank
+    if rank == world_size - 1:
         results = {}
-
-        # queue for handing received latents to decoder
-        decode_queue = queue.Queue(maxsize=MAX_OUTSTANDING)
-
-        # buffer pool: map from shape tuple -> list of tensors
-        free_buffers = {}  # {(bsz,tlen,cch,hh,ww): [tensor1, ...]}
-        free_buffers_origin = {}  # {(bsz,tlen,cch,hh,ww): [tensor1, ...]}
-
-        receiver_stop = threading.Event()
-
-        # start receiver thread
-        rcv_thread = threading.Thread(target=receiver_thread_fn, args=(rank,num_chuncks, device, free_buffers, free_buffers_origin, decode_queue, receiver_stop), daemon=True)
-        rcv_thread.start()
-
-        processed = 0
-        torch.cuda.synchronize()
-        start_time = time.time()
-        while processed < num_chuncks:
-            ci, latents, latents_origin, current_start, current_end, current_step, patched_x_shape = decode_queue.get()  # wait until one chunk available
-
-            shape = tuple(latents.shape)
-
-            if not prepared:
-                # pipeline.prepare will likely initialize caches on rank1
-                pipeline.prepare(latents, text_prompts=prompts)
-                prepared = True
-
-            denoised_pred = pipeline.inference(
-                noise=latents_origin, # [1, 4, 16, 16, 60]
-                current_start=current_start,
-                current_end=current_end,
-                current_step=current_step,
-                block_mode='output',
-                block_num=block_num,
-                patched_x_shape=patched_x_shape,
-                block_x=latents,
-            )
-
-            video = pipeline.vae.stream_decode_to_pixel(denoised_pred)
-            video = (video * 0.5 + 0.5).clamp(0, 1)
-            video = video[0].permute(0, 2, 3, 1).contiguous()
-
-            results[ci] = video.cpu().float().numpy()
-            processed += 1
-
-            # return buffer to free pool for reuse
-            if shape not in free_buffers:
-                free_buffers[shape] = []
-            free_buffers[shape].append(latents)
-
-            torch.cuda.synchronize()
-            end_time = time.time()
-            t = end_time - start_time
-            print(f"[rank {rank}] Decode time: {t:.4f} s, fps: {video.shape[0]/t:.4f}")
-            start_time = end_time
-
-        # wait receiver thread to exit cleanly (should have finished num_chuncks)
-        rcv_thread.join(timeout=1.0)
-
-        video_list = [results[i] for i in range(num_chuncks)]
-        video = np.concatenate(video_list, axis=0)
-        export_to_video(
-            video, os.path.join(args.output_folder, f"output_{0:03d}.mp4"), fps=args.fps)
-        print(f"Video saved to: {os.path.join(args.output_folder, f'output_{0:03d}.mp4')}")
-
-    # ----- RANK {middle rank}: receiver thread(s) + dit blocks + sender -----
-    else:
-        os.makedirs(args.output_folder, exist_ok=True)
-        prepared = False
-        outstanding = []  # list of (work_obj, work_obj2, latents_ref, header_ref)
-        results = {}
-
-        # queue for handing received latents to decoder
-        decode_queue = queue.Queue(maxsize=MAX_OUTSTANDING)
-
-        # buffer pool: map from shape tuple -> list of tensors
-        free_buffers = {}  # {(bsz,tlen,cch,hh,ww): [tensor1, ...]}
-        free_buffers_origin = {} 
-
-        receiver_stop = threading.Event()
-
-        # start receiver thread
-        rcv_thread = threading.Thread(target=receiver_thread_fn, args=(rank,num_chuncks, device, free_buffers, free_buffers_origin, decode_queue, receiver_stop), daemon=True)
-        rcv_thread.start()
-
-        processed = 0
-        torch.cuda.synchronize()
-        start_time = time.time()
-        while processed < num_chuncks:
-            i, latents, latents_origin, current_start, current_end, current_step, patched_x_shape = decode_queue.get()  # wait until one chunk available
-
-            shape = tuple(latents.shape)
-
-            if not prepared:
-                # pipeline.prepare will likely initialize caches on rank1
-                pipeline.prepare(latents, text_prompts=prompts)
-                prepared = True
-
-            denoised_pred, _ = pipeline.inference(
-                noise=latents, # [1, 4, 16, 16, 60]
-                current_start=current_start,
-                current_end=current_end,
-                current_step=current_step,
-                block_mode='middle',
-                block_num=block_num,
-                patched_x_shape=patched_x_shape,
-            )
-
-            processed += 1
-
-            while len(outstanding) >= MAX_OUTSTANDING:
-                oldest = outstanding.pop(0)
-                # wait for both header & payload to finish
-                try:
-                    oldest[0].wait()
-                    oldest[1].wait()
-                    oldest[2].wait()
-                    oldest[3].wait()
-                    oldest[4].wait()
-                    oldest[5].wait()
-                except Exception:
-                    raise Exception(f"Error waiting for outstanding chunks {i}")
-
-            send_latents_fn(i, denoised_pred, latents_origin, patched_x_shape, current_start, current_end, current_step, device, rank, outstanding)
-
-            torch.cuda.synchronize()
-            end_time = time.time()
-            t = end_time - start_time
-            print(f"[rank {rank}] Encode time: {t:.4f} s, fps: {chunck_size/t:.4f}")
-            start_time = end_time
-
+        video = pipeline_manager.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+        video = (video * 0.5 + 0.5).clamp(0, 1)
+        video = video[0].permute(0, 2, 3, 1).contiguous()
+        results[0] = video.cpu().float().numpy()
+    
     dist.barrier()
-
+    print(f"[rank {rank}] Prepared, block_num: {block_num[rank]}")
+    
+    # Run appropriate loop based on rank
+    try:
+        if rank == 0:
+            pipeline_manager.run_rank_0_loop(
+                input_video_original, prompts, num_chuncks, num_steps, chunck_size,
+                block_num, args.noise_scale, args.schedule_block, total_blocks
+            )
+        elif rank == world_size - 1:
+            pipeline_manager.run_final_rank_loop(
+                num_chuncks, num_steps, chunck_size, block_num, args.output_folder,
+                args.fps, args.schedule_block, total_blocks, results
+            )
+        else:
+            pipeline_manager.run_middle_rank_loop(
+                num_chuncks, num_steps, chunck_size, block_num, args.schedule_block, total_blocks
+            )
+    finally:
+        # Cleanup
+        pipeline_manager.cleanup()
+    
+    dist.barrier()
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
