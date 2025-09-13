@@ -249,6 +249,8 @@ class InferencePipelineManager:
             
             torch.cuda.current_stream().wait_stream(com_stream)
             
+            if self.processed == num_chuncks + (num_steps - 1) * self.world_size:
+                break
             # Wait for outstanding operations
             while len(outstanding) >= self.config.get('max_outstanding', 1):
                 oldest = outstanding.pop(0)
@@ -290,8 +292,6 @@ class InferencePipelineManager:
                 self.pipeline.kv_cache_ends.copy_(latent_data.current_end)
             
             start_time = end_time
-            if self.processed == num_chuncks + (num_steps - 1) * self.world_size:
-                break
         
         self.logger.info("Rank 0 inference loop completed")
     
