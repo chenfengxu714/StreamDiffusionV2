@@ -239,18 +239,12 @@ class InferencePipelineManager:
             
             # Handle communication
             with torch.cuda.stream(com_stream):
-                if self.processed == self.world_size:
-                    # Initialize buffer pools
-                    pass
-                
                 if self.processed >= self.world_size:
                     # Receive data from previous rank
                     latent_data = self.data_transfer.receive_latent_data_async(num_steps)
             
             torch.cuda.current_stream().wait_stream(com_stream)
             
-            if self.processed == num_chuncks + (num_steps - 1) * self.world_size:
-                break
             # Wait for outstanding operations
             while len(outstanding) >= self.config.get('max_outstanding', 1):
                 oldest = outstanding.pop(0)
@@ -292,6 +286,8 @@ class InferencePipelineManager:
                 self.pipeline.kv_cache_ends.copy_(latent_data.current_end)
             
             start_time = end_time
+            if self.processed == num_chuncks + (num_steps - 1) * self.world_size:
+                break
         
         self.logger.info("Rank 0 inference loop completed")
     
@@ -314,12 +310,11 @@ class InferencePipelineManager:
         torch.cuda.synchronize()
         start_time = time.time()
         
+        # Receive data from previous rank
+        with torch.cuda.stream(com_stream):
+            latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+        torch.cuda.current_stream().wait_stream(com_stream)
         while save_results < num_chuncks:
-            # Receive data from previous rank
-            with torch.cuda.stream(com_stream):
-                latent_data = self.data_transfer.receive_latent_data_async(num_steps)
-            torch.cuda.current_stream().wait_stream(com_stream)
-            
             # Measure DiT time if scheduling is enabled
             if schedule_block:
                 torch.cuda.synchronize()
@@ -337,8 +332,6 @@ class InferencePipelineManager:
                 block_x=latent_data.latents,
             )
             
-            self.buffer_manager.return_buffer(latent_data.latents, "latent")
-            self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
             # Update DiT timing
             if schedule_block:
                 torch.cuda.synchronize()
@@ -366,6 +359,11 @@ class InferencePipelineManager:
                     current_step=latent_data.current_step
                 )
                 outstanding.append(work_objects)
+
+            # Receive data from previous rank
+            with torch.cuda.stream(com_stream):
+                latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+            torch.cuda.current_stream().wait_stream(com_stream)
             
             # Decode and save video
             if self.processed >= num_steps * self.world_size - 1:

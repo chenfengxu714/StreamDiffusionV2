@@ -628,6 +628,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     }
                 )
                 x = block(x, **kwargs)
+        if block_mode == 'input' and block_num[-1]==block_index+1:
+            return x, patched_x_shape
 
         # head
         x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))
