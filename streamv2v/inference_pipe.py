@@ -194,6 +194,10 @@ class InferencePipelineManager:
             end_idx = end_idx + chunck_size
             current_start = current_end
             current_end = current_end + (chunck_size // 4) * self.pipeline.frame_seq_length
+
+            if schedule_block:
+                torch.cuda.synchronize()
+                start_vae = time.time()
                 
             if end_idx <= input_video_original.shape[2]:
                 inp = input_video_original[:, :, start_idx:end_idx]
@@ -212,6 +216,7 @@ class InferencePipelineManager:
             if schedule_block:
                 torch.cuda.synchronize()
                 start_dit = time.time()
+                t_vae = start_dit - start_vae
             
             # Run inference
             denoised_pred, patched_x_shape = self.pipeline.inference(
@@ -263,23 +268,26 @@ class InferencePipelineManager:
                 )
                 outstanding.append(work_objects)
 
-            if self.processed >= self.world_size:
-                self.pipeline.hidden_states = latent_data.original_latents
-                self.pipeline.kv_cache_starts.copy_(latent_data.current_start)
-                self.pipeline.kv_cache_ends.copy_(latent_data.current_end)
-            
-            # Handle block scheduling
-            if schedule_block and self.processed == self.schedule_step:
-                self._handle_block_scheduling(block_num, total_blocks)
-            
             # Update timing and check completion
             torch.cuda.synchronize()
             end_time = time.time()
             t = end_time - start_time
             self.logger.info(f"Encode {self.processed}, time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
             
-            if t < self.t_total:
-                self.t_total = t
+            if schedule_block:
+                t_total = self.t_dit + t_vae
+                if t_total < self.t_total:
+                    self.t_total = t_total
+
+            # Handle block scheduling
+            if schedule_block and self.processed >= self.schedule_step:
+                self._handle_block_scheduling(block_num, total_blocks)
+                schedule_block = False
+
+            if self.processed >= self.world_size:
+                self.pipeline.hidden_states = latent_data.original_latents
+                self.pipeline.kv_cache_starts.copy_(latent_data.current_start)
+                self.pipeline.kv_cache_ends.copy_(latent_data.current_end)
             
             start_time = end_time
             if self.processed == num_chuncks + (num_steps - 1) * self.world_size:
@@ -316,8 +324,6 @@ class InferencePipelineManager:
             if schedule_block:
                 torch.cuda.synchronize()
                 start_dit = time.time()
-            if save_results == num_chuncks-1:
-                break
             
             # Run inference
             denoised_pred, _ = self.pipeline.inference(
@@ -331,6 +337,8 @@ class InferencePipelineManager:
                 block_x=latent_data.latents,
             )
             
+            self.buffer_manager.return_buffer(latent_data.latents, "latent")
+            self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
             # Update DiT timing
             if schedule_block:
                 torch.cuda.synchronize()
@@ -360,33 +368,38 @@ class InferencePipelineManager:
                 outstanding.append(work_objects)
             
             # Decode and save video
-            if self.processed >= num_steps * 2:
+            if self.processed >= num_steps * self.world_size - 1:
+                if schedule_block:
+                    torch.cuda.synchronize()
+                    start_vae = time.time()
+
                 video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred[[-1]])
                 video = (video * 0.5 + 0.5).clamp(0, 1)
                 video = video[0].permute(0, 2, 3, 1).contiguous()
                 
                 results[save_results] = video.cpu().float().numpy()
                 
-                # Return buffer to pool
-                self.buffer_manager.return_buffer(latent_data.latents, "latent")
-                
                 torch.cuda.synchronize()
                 end_time = time.time()
                 t = end_time - start_time
                 self.logger.info(f"Decode {self.processed}, time: {t:.4f} s, fps: {video.shape[0]/t:.4f}")
                 
-                if t < self.t_total:
-                    self.t_total = t
+                if schedule_block:
+                    t_vae = end_time - start_vae
+                    t_total = t_vae + self.t_dit
+                    if t_total < self.t_total:
+                        self.t_total = t_total
                 
                 save_results += 1
                 start_time = end_time
                 
                 # Handle block scheduling
-                if schedule_block and self.processed == self.schedule_step:
+                if schedule_block and self.processed >= self.schedule_step - self.rank:
                     self._handle_block_scheduling(block_num, total_blocks)
+                    schedule_block = False
         
         # Save final video
-        video_list = [results[i] for i in range(num_chuncks-1)]
+        video_list = [results[i] for i in range(num_chuncks)]
         video = np.concatenate(video_list, axis=0)
         self.logger.info(f"Video shape: {video.shape}")
         
@@ -624,7 +637,7 @@ def main():
         results[0] = video.cpu().float().numpy()
     
     dist.barrier()
-    print(f"[rank {rank}] Prepared, block_num: {block_num[rank]}")
+    pipeline_manager.logger.info(f"Prepared, Block num: {block_num[rank].tolist()}")
     
     # Run appropriate loop based on rank
     try:
