@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=29501 streamv2v/inference_pipe.py \
+CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29501 streamv2v/inference_pipe.py \
 --config_path configs/wan_causal_dmd_v2v.yaml \
 --checkpoint_folder wan_causal_dmd/2025-08-14-09-44-27.384892_seed290041/checkpoint_model_001000 \
 --output_folder outputs/ \
