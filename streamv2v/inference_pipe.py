@@ -5,7 +5,7 @@ This is a refactored version of inference_pipe_multi.py that uses the new
 communication abstraction layers for better code organization and maintainability.
 """
 
-from causvid.models.wan.causal_stream_inference_pipe_multi import CausalStreamInferencePipeline
+from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
 from omegaconf import OmegaConf
