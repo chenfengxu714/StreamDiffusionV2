@@ -63,6 +63,12 @@ class KVCacheManager:
         with CommunicationTimer(f"broadcast_kv_blocks from rank {donor_rank}", self.logger):
             for bi in block_indices:
                 # Broadcast key cache
+                if self.pipeline.kv_cache1[bi]['k'].device != self.device:
+                    self.pipeline.kv_cache1[bi]['k'] = self.pipeline.kv_cache1[bi]['k'].to(self.device)
+                    self.pipeline.kv_cache1[bi]['v'] = self.pipeline.kv_cache1[bi]['v'].to(self.device)
+                
+                dist.barrier()
+
                 dist.broadcast(self.pipeline.kv_cache1[bi]['k'], src=donor_rank)
                 
                 # Broadcast value cache

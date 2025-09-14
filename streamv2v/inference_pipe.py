@@ -149,7 +149,7 @@ class InferencePipelineManager:
         self.logger.info("Model loaded successfully")
     
     def prepare_pipeline(self, text_prompts: list, noise: torch.Tensor, 
-                        block_mode: str, current_start: int, current_end: int):
+                        block_mode: str, current_start: int, current_end: int, block_num: torch.Tensor):
         """Prepare the pipeline for inference."""
         denoised_pred = self.pipeline.prepare(
             text_prompts=text_prompts, 
@@ -158,7 +158,8 @@ class InferencePipelineManager:
             noise=noise, 
             block_mode=block_mode, 
             current_start=current_start, 
-            current_end=current_end
+            current_end=current_end,
+            block_num=block_num
         )
         
         # Broadcast the prepared result from rank 0
@@ -504,7 +505,14 @@ class InferencePipelineManager:
         
         # Update block_num
         block_num.copy_(new_block_num)
-        
+
+        start_block, end_block = block_num[self.rank][0].item(), block_num[self.rank][1].item()
+        blocks_to_keep = list(range(start_block, end_block))
+        for i in range(self.pipeline.num_transformer_blocks):
+            if i not in blocks_to_keep:
+                self.pipeline.kv_cache1[i]['k'] = self.pipeline.kv_cache1[i]['k'].cpu()
+                self.pipeline.kv_cache1[i]['v'] = self.pipeline.kv_cache1[i]['v'].cpu()
+
         self.logger.info("Block scheduling completed")
     
     def cleanup(self):
@@ -611,21 +619,40 @@ def main():
     current_end = pipeline_manager.pipeline.frame_seq_length * 2
     
     inp = input_video_original[:, :, start_idx:end_idx]
-    latents = pipeline_manager.pipeline.vae.model.stream_encode(inp)
-    latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
-    noise = torch.randn_like(latents)
-    noisy_latents = noise * args.noise_scale + latents * (1 - args.noise_scale)
     
-    dist.broadcast(noisy_latents, src=0)
+    # Only rank 0 performs VAE encoding operation
+    if rank == 0:
+        latents = pipeline_manager.pipeline.vae.model.stream_encode(inp)
+        latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
+        noise = torch.randn_like(latents)
+        noisy_latents = noise * args.noise_scale + latents * (1 - args.noise_scale)
+        
+        # First broadcast the shape information
+        latents_shape = torch.tensor(latents.shape, dtype=torch.int64, device=device)
+        pipeline_manager.communicator.broadcast_tensor(latents_shape, src=0)
+        # Then broadcast noisy_latents
+        pipeline_manager.communicator.broadcast_tensor(noisy_latents, src=0)
+    else:
+        # Other ranks receive shape info first
+        latents_shape = torch.zeros(5, dtype=torch.int64, device=device)
+        pipeline_manager.communicator.broadcast_tensor(latents_shape, src=0)
+        # Create tensor with same shape for receiving broadcast data
+        noisy_latents = torch.zeros(tuple(latents_shape.tolist()), dtype=torch.bfloat16, device=device)
+        # Receive the broadcasted noisy_latents
+        pipeline_manager.communicator.broadcast_tensor(noisy_latents, src=0)
     
     denoised_pred = pipeline_manager.prepare_pipeline(
         text_prompts=prompts,
         noise=noisy_latents,
         block_mode=block_mode,
         current_start=current_start,
-        current_end=current_end
+        current_end=current_end,
+        block_num=block_num[rank],
     )
-    
+
+    # Clear unused GPU memory
+    torch.cuda.empty_cache()
+
     # Save initial result for final rank
     if rank == world_size - 1:
         results = {}

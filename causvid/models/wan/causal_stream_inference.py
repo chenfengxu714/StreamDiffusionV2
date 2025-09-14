@@ -96,6 +96,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         noise: torch.Tensor = None,
         current_start: int = 0,
         current_end: int = None,
+        block_num: torch.Tensor = None,
     ):
         self.device = device
         batch_size = noise.shape[0]
@@ -163,6 +164,15 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         # Pre-allocate hidden_states tensor to avoid memory allocation during inference
         self.batch_size = len(self.denoising_step_list)
 
+        # Determine which blocks to keep based on block_num range
+        blocks_to_keep = []
+        if block_num is not None:
+            start_block, end_block = block_num[0].item(), block_num[1].item()
+            blocks_to_keep = list(range(start_block, end_block))
+        else:
+            blocks_to_keep = list(range(self.num_transformer_blocks))
+
+        # Process only the blocks in the specified range
         for i in range(self.num_transformer_blocks):
             if dist.is_initialized():
                 dist.broadcast(self.crossattn_cache[i]['k'], src=0)
@@ -170,14 +180,21 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 dist.broadcast(self.kv_cache1[i]['k'], src=0)
                 dist.broadcast(self.kv_cache1[i]['v'], src=0)
 
-            self.crossattn_cache[i]['k'] = self.crossattn_cache[i]['k'].repeat(self.batch_size, 1, 1, 1)
-            self.crossattn_cache[i]['v'] = self.crossattn_cache[i]['v'].repeat(self.batch_size, 1, 1, 1)
-
             self.kv_cache1[i]['k'] = self.kv_cache1[i]['k'].repeat(self.batch_size, 1, 1, 1)
             self.kv_cache1[i]['v'] = self.kv_cache1[i]['v'].repeat(self.batch_size, 1, 1, 1)
 
             self.kv_cache1[i]['global_end_index'] = self.kv_cache1[i]['global_end_index'].repeat(self.batch_size)
             self.kv_cache1[i]['local_end_index'] = self.kv_cache1[i]['local_end_index'].repeat(self.batch_size)
+
+            self.crossattn_cache[i]['k'] = self.crossattn_cache[i]['k'].repeat(self.batch_size, 1, 1, 1)
+            self.crossattn_cache[i]['v'] = self.crossattn_cache[i]['v'].repeat(self.batch_size, 1, 1, 1)
+        
+        # Remove blocks outside the range
+        if block_num is not None:
+            for i in range(self.num_transformer_blocks):
+                if i not in blocks_to_keep:
+                    self.kv_cache1[i]['k'] = self.kv_cache1[i]['k'].cpu()
+                    self.kv_cache1[i]['v'] = self.kv_cache1[i]['v'].cpu()
 
         self.hidden_states = torch.zeros(
             (self.batch_size, self.num_frame_per_block, *noise.shape[2:]), dtype=noise.dtype, device=device
