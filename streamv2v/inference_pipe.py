@@ -138,7 +138,7 @@ class InferencePipelineManager:
         self.t_dit = 100.0
         self.t_total = 100.0
         self.processed = 0
-        self.schedule_step = 4 + len(config.denoising_step_list)
+        self.schedule_step = (self.world_size + len(config.denoising_step_list)) * 2
         
         self.logger.info(f"Initialized InferencePipelineManager for rank {rank}")
     
@@ -287,7 +287,7 @@ class InferencePipelineManager:
                 self.pipeline.kv_cache_ends.copy_(latent_data.current_end)
             
             start_time = end_time
-            if self.processed == num_chuncks + (num_steps - 1) * self.world_size:
+            if self.processed == num_chuncks + num_steps * self.world_size - 4//self.world_size:
                 break
         
         self.logger.info("Rank 0 inference loop completed")
@@ -396,6 +396,9 @@ class InferencePipelineManager:
                 if schedule_block and self.processed >= self.schedule_step - self.rank:
                     self._handle_block_scheduling(block_num, total_blocks)
                     schedule_block = False
+
+            if save_results == num_chuncks:
+                break
         
         # Save final video
         video_list = [results[i] for i in range(num_chuncks)]
@@ -421,11 +424,15 @@ class InferencePipelineManager:
         torch.cuda.synchronize()
         start_time = time.time()
         
-        while self.processed < num_chuncks + num_steps + self.world_size:
+        while True:
             # Receive data from previous rank
             with torch.cuda.stream(com_stream):
                 latent_data = self.data_transfer.receive_latent_data_async(num_steps)
             torch.cuda.current_stream().wait_stream(com_stream)
+
+            if schedule_block:
+                torch.cuda.synchronize()
+                start_dit = time.time()
             
             # Run inference
             denoised_pred, _ = self.pipeline.inference(
@@ -438,6 +445,12 @@ class InferencePipelineManager:
                 patched_x_shape=latent_data.patched_x_shape,
                 block_x=latent_data.latents,
             )
+            
+            if schedule_block:
+                torch.cuda.synchronize()
+                temp = time.time() - start_dit
+                if temp < self.t_dit:
+                    self.t_dit = temp
             
             self.processed += 1
             
@@ -464,13 +477,23 @@ class InferencePipelineManager:
             torch.cuda.synchronize()
             end_time = time.time()
             t = end_time - start_time
-            if t < self.t_total:
-                self.t_total = t
+
+            if schedule_block:
+                t_total = self.t_dit
+                if t_total < self.t_total:
+                    self.t_total = t_total
+
+            # Handle block scheduling
+            if schedule_block and self.processed >= self.schedule_step - self.rank:
+                self._handle_block_scheduling(block_num, total_blocks)
+                schedule_block = False
             
-            self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, fps: {chunck_size/t:.4f}")
+            self.logger.info(f"Middle {self.processed}, time: {t:.4f} s, fps: {chunck_size/t:.4f}")
             start_time = end_time
+            if self.processed == num_chuncks + num_steps * self.world_size - 4//self.world_size:
+                break
         
-        self.logger.info("Middle rank inference loop completed")
+        self.logger.info(f"Rank {self.rank} inference loop completed")
     
     def _handle_block_scheduling(self, block_num: torch.Tensor, total_blocks: int):
         """Handle block scheduling and rebalancing."""
@@ -663,6 +686,10 @@ def main():
     
     dist.barrier()
     pipeline_manager.logger.info(f"Prepared, Block num: {block_num[rank].tolist()}")
+
+    used_mem = torch.cuda.memory_allocated(device) / 1024 / 1024 / 1024
+    total_mem = torch.cuda.get_device_properties(device).total_memory / 1024 / 1024 / 1024
+    pipeline_manager.logger.info(f"Current GPU memory usage: {used_mem:.2f} GB / {total_mem:.2f} GB")
     
     # Run appropriate loop based on rank
     try:

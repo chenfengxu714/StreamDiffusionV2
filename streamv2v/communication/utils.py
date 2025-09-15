@@ -159,6 +159,11 @@ def compute_balanced_split(total_blocks: int, rank_times: List[float],
     num_ranks = len(rank_times)
     if num_ranks == 0 or num_ranks != len(current_block_nums) or num_ranks != len(dit_times):
         return current_block_nums
+    
+    # Edge case: if we have more ranks than blocks, we can't guarantee 1 block per rank
+    if num_ranks > total_blocks:
+        # Fall back to original behavior for this edge case
+        return current_block_nums
 
     # Step 1: Calculate total DiT time and per-block DiT time
     total_dit_time = sum(dit_times)
@@ -180,11 +185,11 @@ def compute_balanced_split(total_blocks: int, rank_times: List[float],
         time_diff = avg_rank_time - rank_times[i]  # positive = needs more time, negative = needs less time
         block_adjustment = time_diff / dit_time_per_block  # convert time difference to block count
         target_count = current_block_counts[i] + block_adjustment
-        # Allow zero-length intervals by clamping at 0 (upper bound will be enforced by sum adjustment)
-        target_count = max(0, int(round(target_count)))
+        # Ensure each rank gets at least 1 block (minimum allocation)
+        target_count = max(1, int(round(target_count)))
         target_blocks.append(target_count)
     
-    # Step 5: Adjust to ensure total blocks sum to total_blocks
+    # Step 5: Adjust to ensure total blocks sum to total_blocks while maintaining minimum 1 block per rank
     current_total = sum(target_blocks)
     if current_total != total_blocks:
         diff = total_blocks - current_total
@@ -200,7 +205,8 @@ def compute_balanced_split(total_blocks: int, rank_times: List[float],
                 target_blocks[idx] += 1
                 diff -= 1
             else:
-                if target_blocks[idx] > 0:
+                # Only remove blocks if rank has more than 1 block (maintain minimum allocation)
+                if target_blocks[idx] > 1:
                     target_blocks[idx] -= 1
                     diff += 1
             i += 1

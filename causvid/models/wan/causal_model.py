@@ -617,19 +617,18 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             else:
                 if (block_mode == 'output' or block_mode == 'middle') and block_index < block_num[0]:
                     continue
-                elif (block_mode == 'input' or block_mode == 'middle') and block_index == block_num[-1]:
+                if (block_mode == 'input' or block_mode == 'middle') and block_index == block_num[-1]:
                     return x, patched_x_shape
-                else:
-                    kwargs.update(
-                        {
-                            "kv_cache": kv_cache[block_index],
-                            "crossattn_cache": crossattn_cache[block_index],
-                            "current_start": current_start,
-                            "current_end": current_end
-                        }
-                    )
-                    x = block(x, **kwargs)
-        if block_mode == 'input' and block_num[-1]==block_index+1:
+                kwargs.update(
+                    {
+                        "kv_cache": kv_cache[block_index],
+                        "crossattn_cache": crossattn_cache[block_index],
+                        "current_start": current_start,
+                        "current_end": current_end
+                    }
+                )
+                x = block(x, **kwargs)
+        if block_mode == 'input' and block_num[-1] == len(self.blocks):
             return x, patched_x_shape
 
         # head

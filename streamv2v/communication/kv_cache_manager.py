@@ -70,18 +70,16 @@ class KVCacheManager:
                 dist.barrier()
 
                 dist.broadcast(self.pipeline.kv_cache1[bi]['k'], src=donor_rank)
-                
                 # Broadcast value cache
                 dist.broadcast(self.pipeline.kv_cache1[bi]['v'], src=donor_rank)
-                
                 # Broadcast global end index
                 dist.broadcast(self.pipeline.kv_cache1[bi]['global_end_index'], src=donor_rank)
-                
                 # Broadcast local end index
                 dist.broadcast(self.pipeline.kv_cache1[bi]['local_end_index'], src=donor_rank)
                 
                 # Adjust global_end_index for the receiving rank
-                self.pipeline.kv_cache1[bi]['global_end_index'] += self.frame_seq_length * (donor_rank - rank) * self.time_step_length
+                if donor_rank > rank:
+                    self.pipeline.kv_cache1[bi]['global_end_index'] += self.frame_seq_length * (donor_rank - rank) * self.time_step_length
         
         self.logger.debug(f"Broadcasted KV cache for blocks {block_indices} from rank {donor_rank}")
     
