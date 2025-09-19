@@ -1,6 +1,6 @@
-CUDA_VISIBLE_DEVICES=0 python streamv2v/inference.py \
+python streamv2v/inference.py \
 --config_path configs/wan_causal_dmd_v2v.yaml \
---checkpoint_folder wan_causal_dmd/2025-08-14-09-44-27.384892_seed290041/checkpoint_model_001000 \
+--checkpoint_folder ckpts/wan_causal_dmd_v2v \
 --output_folder outputs/ \
 --prompt_file_path prompt.txt \
 --video_path original.mp4 \

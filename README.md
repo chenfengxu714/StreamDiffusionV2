@@ -1,6 +1,6 @@
 # StreamDiffusionV2
 
-Installation
+## Installation
 ```shell
 conda create -n stream python=3.10.0
 conda activate stream
@@ -9,13 +9,19 @@ pip install -r requirements.txt
 python setup.py develop
 ```
 
-Download Checkpoints
+## Download Checkpoints
 ```shell
 huggingface-cli download --resume-download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2V-1.3B
-huggingface-cli download --resume-download tianweiy/CausVid --local-dir ./ckpts --include autoregressive_checkpoint/*
+```
+Then download the checkpoint of generator from [Google Drive](https://drive.google.com/drive/folders/1YpOObikpsiNBsfTVv1w4EIbegE_UglY2?usp=sharing) and put into ckpts/wan_causal_dmd_v2v.
+
+## Stream V2V Inference
+For single GPU
+```shell
+bash v2v_inference.sh
 ```
 
-Stream V2V Inference
+For multi-GPUs
 ```shell
-bash v2v_inference
+bash v2v_inference_pipe.sh
 ```
