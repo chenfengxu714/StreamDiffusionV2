@@ -150,7 +150,7 @@ class App:
                     ema_frame_interval = sleep_time
                     while True:
                         queue_size = await self.conn_manager.get_output_queue_size(user_id)
-                        print(f"Queue size: {queue_size}")
+                        # print(f"Queue size: {queue_size}")
                         if queue_size > last_queue_size:
                             # A new burst has come in
                             current_burst_time = time.time()
@@ -177,7 +177,7 @@ class App:
                                 frame_time_list.append(time.time() - last_frame_time)
                                 if len(frame_time_list) > 100:
                                     frame_time_list.pop(0)
-                                print(f"FPS: {len(frame_time_list) / sum(frame_time_list)}")
+                                # print(f"FPS: {len(frame_time_list) / sum(frame_time_list)}")
                                 last_frame_time = time.time()
                         except Exception as e:
                             print(f"Frame fetch error: {e}")
@@ -247,17 +247,47 @@ class App:
 
 if __name__ == "__main__":
     import uvicorn
+    import signal
+    import sys
 
     mp.set_start_method("spawn", force=True)
 
     pipeline = Pipeline(config)
     app = App(config, pipeline).app
 
-    uvicorn.run(
-        app,
-        host=config.host,
-        port=config.port,
-        reload=False,
-        ssl_certfile=config.ssl_certfile,
-        ssl_keyfile=config.ssl_keyfile,
-    )
+    def signal_handler(sig, frame):
+        print("\nShutting down gracefully...")
+        pipeline.close()
+        sys.exit(0)
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        uvicorn.run(
+            app,
+            host=config.host,
+            port=config.port,
+            reload=False,
+            ssl_certfile=config.ssl_certfile,
+            ssl_keyfile=config.ssl_keyfile,
+        )
+    except KeyboardInterrupt:
+        print("\nShutting down gracefully...")
+        try:
+            pipeline.close()
+        except Exception as e:
+            print(f"Error during pipeline close: {e}")
+        finally:
+            print("Exiting...")
+            import os
+            os._exit(0)
+    finally:
+        try:
+            pipeline.close()
+        except Exception as e:
+            print(f"Error during pipeline close: {e}")
+        print("Exiting...")
+        import os
+        os._exit(0)

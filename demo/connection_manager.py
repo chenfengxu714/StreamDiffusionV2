@@ -105,7 +105,7 @@ class ConnectionManager:
         finally:
             try:
                 self.delete_user(user_id)
-                pipeline.clear_images()
+                pipeline.close()
             except Exception as e:
                 logging.error(f"Error: Exception while clearing images for {user_id}: {e}")
 

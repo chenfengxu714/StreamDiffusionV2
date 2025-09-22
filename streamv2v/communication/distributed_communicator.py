@@ -255,6 +255,36 @@ class DistributedCommunicator:
         
         self.logger.debug(f"Received latent data from rank {src}, chunk_idx: {chunk_idx}")
         return chunk_idx, latents, original_latents, current_start, current_end, current_step, patched_x_shape
+
+    def send_prompt_async(self, prompt: str, device: torch.device) -> List[Any]:
+        work_objects = []
+        dst = get_next_rank(self.rank, self.world_size)
+
+        # Encode to bytes
+        encoded = prompt.encode("utf-8")
+        data = torch.ByteTensor(list(encoded)).to(device)
+
+        # Send length first
+        length = torch.tensor([len(data)], dtype=torch.int64, device=data.device)
+        work_objects.append(dist.isend(length, dst=dst, tag=CommunicationTags.UPDATED_PROMPT_LENGTH))
+
+        # Then send the content
+        work_objects.append(dist.isend(data, dst=dst, tag=CommunicationTags.UPDATED_PROMPT))
+
+        return work_objects
+
+    def recv_prompt_async(self) -> str:
+        src = get_prev_rank(self.rank, self.world_size)
+
+        # Receive length first
+        length = torch.empty(1, dtype=torch.int64, device=self.device)
+        dist.recv(length, src=src, tag=CommunicationTags.UPDATED_PROMPT_LENGTH)
+
+        # Then receive the content
+        prompt = torch.empty(length.item(), dtype=torch.uint8, device=self.device)
+        dist.recv(prompt, src=src, tag=CommunicationTags.UPDATED_PROMPT)
+
+        return bytes(prompt.cpu().tolist()).decode("utf-8")    
     
     def broadcast_tensor(self, tensor: torch.Tensor, src: int) -> None:
         """

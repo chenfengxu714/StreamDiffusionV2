@@ -21,16 +21,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.vae = get_vae_wrapper(model_name=args.model_name)()
 
         # Step 2: Initialize all causal hyperparmeters
-        self.denoising_step_list = torch.tensor(
-            args.denoising_step_list, dtype=torch.long, device=device)
-        assert self.denoising_step_list[-1] == 0
-        # remove the last timestep (which equals zero)
-        self.denoising_step_list = self.denoising_step_list[:-1]
-
-        self.scheduler = self.generator.get_scheduler()
-        if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time shift
-            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).cuda()
-            self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
+        self._init_denoising_step_list(args, device)
 
         self.num_transformer_blocks = 30
         scale_size = 16
@@ -53,6 +44,18 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.generator.model.num_frame_per_block = self.num_frame_per_block
 
         self.generator.model.to(self.device)
+
+    def _init_denoising_step_list(self, args, device):
+        self.denoising_step_list = torch.tensor(
+            args.denoising_step_list, dtype=torch.long, device=device)
+        assert self.denoising_step_list[-1] == 0
+        # remove the last timestep (which equals zero)
+        self.denoising_step_list = self.denoising_step_list[:-1]
+
+        self.scheduler = self.generator.get_scheduler()
+        if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time shift
+            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).cuda()
+            self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
     def _initialize_kv_cache(self, batch_size, dtype, device):
         """

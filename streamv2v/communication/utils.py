@@ -25,6 +25,8 @@ class CommunicationTags:
     KV_CACHE_LOCAL_END = 11010
     BLOCK_INTERVALS = 11011
     PERFORMANCE_METRICS = 11012
+    UPDATED_PROMPT_LENGTH = 11013
+    UPDATED_PROMPT = 11014
 
 
 def init_distributed():

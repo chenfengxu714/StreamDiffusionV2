@@ -57,7 +57,7 @@ parser.add_argument(
 )
 parser.add_argument("--timeout", type=float, default=TIMEOUT, help="Timeout")
 parser.add_argument("--config_path", type=str, default="../configs/wan_causal_dmd_v2v.yaml")
-parser.add_argument("--checkpoint_folder", type=str, default="../ckpts/autoregressive_checkpoint")
+parser.add_argument("--checkpoint_folder", type=str, default="../ckpts/wan_causal_dmd_v2v")
 parser.add_argument("--noise_scale", type=float, default=0.8)
 parser.add_argument("--overlap", type=int, default=0)
 parser.add_argument("--num_kv_cache", type=int, default=30)

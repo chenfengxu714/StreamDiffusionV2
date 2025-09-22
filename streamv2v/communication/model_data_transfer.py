@@ -117,6 +117,12 @@ class ModelDataTransfer:
             current_step=current_step,
             patched_x_shape=patched_x_shape
         )
+
+    def send_prompt_async(self, prompt: str, device: torch.device) -> List[Any]:
+        return self.comm.send_prompt_async(prompt, device)
+
+    def recv_prompt_async(self) -> str:
+        return self.comm.recv_prompt_async()
     
     def send_kv_cache_blocks(self, block_indices: List[int], donor_rank: int) -> None:
         """
