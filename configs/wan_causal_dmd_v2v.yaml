@@ -13,6 +13,7 @@ fake_score_grad:
   model: true
 denoising_step_list:
 - 700
+- 500
 - 0
 num_train_timestep: 1000
 timestep_shift: 8.0
@@ -48,5 +49,6 @@ distillation_loss: dmd
 gradient_checkpointing: true
 backward_simulation: false
 num_frame_per_block: 1
-num_kv_cache: 9
+num_kv_cache: 6
+num_sink_tokens: 3
 warp_denoising_step: false

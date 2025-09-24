@@ -11,7 +11,7 @@ easydict
 ftfy
 dashscope
 imageio-ffmpeg
-flash_attn
+flash_attn==2.7.4.post1
 gradio>=5.0.0
 numpy==1.24.4
 boto3

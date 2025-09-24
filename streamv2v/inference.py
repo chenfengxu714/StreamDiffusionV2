@@ -148,6 +148,8 @@ class SingleGPUInferencePipeline:
         os.makedirs(output_folder, exist_ok=True)
         results = {}
         save_results = 0
+
+        fps_list = []
         
         # Initialize variables
         start_idx = 0
@@ -233,13 +235,16 @@ class SingleGPUInferencePipeline:
                 torch.cuda.synchronize()
                 end_time = time.time()
                 t = end_time - start_time
-                self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
+                fps_test = inp.shape[2]/t
+                fps_list.append(fps_test)
+                self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, FPS: {fps_test:.4f}")
                 start_time = end_time
         
         # Save final video
         video_list = [results[i] for i in range(num_chuncks)]
         video = np.concatenate(video_list, axis=0)
-        self.logger.info(f"Video shape: {video.shape}")
+        fps_avg = np.mean(np.array(fps_list))
+        self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
         
         output_path = os.path.join(output_folder, f"output_{0:03d}.mp4")
         export_to_video(video, output_path, fps=fps)
@@ -259,7 +264,8 @@ def main():
     parser.add_argument("--noise_scale", type=float, default=0.700, help="Noise scale")
     parser.add_argument("--height", type=int, default=480, help="Video height")
     parser.add_argument("--width", type=int, default=832, help="Video width")
-    parser.add_argument("--fps", type=int, default=30, help="Output video fps")
+    parser.add_argument("--fps", type=int, default=16, help="Output video fps")
+    parser.add_argument("--step", type=int, default=2, help="Step")
     args = parser.parse_args()
     
     torch.set_grad_enabled(False)
@@ -271,6 +277,18 @@ def main():
     config = OmegaConf.load(args.config_path)
     for k, v in vars(args).items():
         config[k] = v
+    # Derive denoising_step_list from step if provided
+    # Always base on the canonical full list to ensure --step overrides YAML
+    full_denoising_list = [700, 600, 500, 400, 0]
+    step_value = args.step
+    if step_value <= 1:
+        config.denoising_step_list = [700, 0]
+    elif step_value == 2:
+        config.denoising_step_list = [700, 500, 0]
+    elif step_value == 3:
+        config.denoising_step_list = [700, 600, 400, 0]
+    else:
+        config.denoising_step_list = full_denoising_list
     
     # Load input video
     input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)

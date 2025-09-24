@@ -54,17 +54,6 @@ href="https://huggingface.co/runwayml/stable-diffusion-v1-5"
 </p>
 """
 
-def fold_2x2_spatial(video: torch.Tensor, original_batch: int) -> torch.Tensor:
-    B4, C, T, H_half, W_half = video.shape
-    assert B4 % 4 == 0 and B4 == original_batch * 4
-
-    video = video.view(original_batch, 2, 2, C, T, H_half, W_half)  # (B, 2, 2, C, T, H//2, W//2)
-    video = video.permute(0, 3, 4, 5, 1, 6, 2)  # (B, C, T, H//2, 2, W//2, 2)
-    video = video.contiguous().view(original_batch, C, T, H_half * 2, W_half * 2)  # (B, C, T, H, W)
-
-    return video
-
-
 class Pipeline:
     class Info(BaseModel):
         name: str = "StreamV2V"
@@ -114,7 +103,6 @@ class Pipeline:
         self.overlap = args.overlap
         self.width = params.width
         self.height = params.height
-        self.unfold = args.unfold
 
         self.prompt = params.prompt
         self.noise_scale = args.noise_scale
@@ -193,8 +181,6 @@ class Pipeline:
             # random_sleep = random.uniform(0.3, 0.5)
             # time.sleep(random_sleep)
 
-        if self.unfold:
-            video = fold_2x2_spatial(video.transpose(1,2), 1).transpose(1,2)
         video = video[0].permute(0, 2, 3, 1).cpu().numpy()
 
         # time_end = time.time()

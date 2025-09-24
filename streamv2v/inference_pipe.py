@@ -316,6 +316,8 @@ class InferencePipelineManager:
         save_results = 1
         
         outstanding = []
+
+        fps_list = []
         
         torch.cuda.synchronize()
         start_time = time.time()
@@ -390,7 +392,10 @@ class InferencePipelineManager:
                 torch.cuda.synchronize()
                 end_time = time.time()
                 t = end_time - start_time
-                self.logger.info(f"Decode {self.processed}, time: {t:.4f} s, fps: {video.shape[0]/t:.4f}")
+                fps_test = video.shape[0]/t
+                if self.processed > self.schedule_step:
+                    fps_list.append(fps_test)
+                self.logger.info(f"Decode {self.processed}, time: {t:.4f} s, FPS: {fps_test:.4f}")
                 
                 if schedule_block:
                     t_vae = end_time - start_vae
@@ -420,7 +425,10 @@ class InferencePipelineManager:
         # Save final video
         video_list = [results[i] for i in range(num_chuncks)]
         video = np.concatenate(video_list, axis=0)
-        self.logger.info(f"Video shape: {video.shape}")
+
+        fps_list = np.array(fps_list)
+        fps_avg = np.mean(fps_list)
+        self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
         
         output_path = os.path.join(output_folder, f"output_{0:03d}.mp4")
         export_to_video(video, output_path, fps=fps)
@@ -586,6 +594,7 @@ def main():
     parser.add_argument("--t5_fsdp", action="store_true", default=False)
     parser.add_argument("--ulysses_size", type=int, default=1)
     parser.add_argument("--ring_size", type=int, default=1)
+    parser.add_argument("--step", type=int, default=2)
     parser.add_argument("--schedule_block", action="store_true", default=False)
     
     args = parser.parse_args()
@@ -606,6 +615,18 @@ def main():
     config = OmegaConf.load(args.config_path)
     for k, v in vars(args).items():
         config[k] = v
+    # Derive denoising_step_list from step if provided
+    # Always base on the canonical full list to ensure --step overrides YAML
+    full_denoising_list = [700, 600, 500, 400, 0]
+    step_value = args.step
+    if step_value <= 1:
+        config.denoising_step_list = [700, 0]
+    elif step_value == 2:
+        config.denoising_step_list = [700, 500, 0]
+    elif step_value == 3:
+        config.denoising_step_list = [700, 600, 400, 0]
+    else:
+        config.denoising_step_list = full_denoising_list
     
     # Load input video
     input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
@@ -628,7 +649,7 @@ def main():
     # Initialize pipeline manager
     pipeline_manager = InferencePipelineManager(config, device, rank, world_size)
     pipeline_manager.load_model(args.checkpoint_folder)
-    
+
     # Load prompts
     dataset = TextDataset(args.prompt_file_path)
     prompts = [dataset[0]]

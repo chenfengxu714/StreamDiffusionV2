@@ -55,4 +55,4 @@ warp_denoising_step: false
 is_repa: true
 repa_loss_weight: 0.2
 repa_layer: 10
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 16
