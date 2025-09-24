@@ -275,7 +275,8 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             pipeline_manager.logger.info(f"Initializing rank {rank} first batch")
             init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num)    
 
-            chunk_idx = 0
+            chunk_idx = 5
+            noise_scale = args.noise_scale
             current_start = pipeline_manager.pipeline.frame_seq_length * 2
             current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
             last_image = images[:,:,[-1]]
@@ -294,7 +295,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             images - torch.cat([last_image, images[:,:,-chunk_size:-1]], dim=2)
         ) ** 2
         l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-        noise_scale = (0.8-0.1*l2_dist.item())*0.9+args.noise_scale*0.1
+        noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
         current_step = int(1000*noise_scale)-100
 
         latents = pipeline_manager.pipeline.vae.model.stream_encode(images)  # [B, 4, T, H//16, W//16] or so
@@ -307,7 +308,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             torch.cuda.synchronize()
             start_dit = time.time()
             t_vae = start_dit - start_vae
-
+        
         denoised_pred, patched_x_shape = pipeline_manager.pipeline.inference(
             noise=noisy_latents, # [1, 4, 16, 16, 60]
             current_start=current_start,
@@ -377,7 +378,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             pipeline_manager.pipeline.kv_cache_ends.copy_(latent_data.current_end)
 
         last_image = images[:,:,[-1]]
-        chunk_idx += 1
+        chunk_idx += 4
         current_start = current_end
         current_end += (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
         is_running = True
