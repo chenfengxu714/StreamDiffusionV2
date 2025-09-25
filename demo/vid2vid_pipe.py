@@ -275,7 +275,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             pipeline_manager.logger.info(f"Initializing rank {rank} first batch")
             init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num)    
 
-            chunk_idx = 5
+            chunk_idx = 0
             noise_scale = args.noise_scale
             current_start = pipeline_manager.pipeline.frame_seq_length * 2
             current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
@@ -308,7 +308,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             torch.cuda.synchronize()
             start_dit = time.time()
             t_vae = start_dit - start_vae
-        
+
         denoised_pred, patched_x_shape = pipeline_manager.pipeline.inference(
             noise=noisy_latents, # [1, 4, 16, 16, 60]
             current_start=current_start,
@@ -378,7 +378,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             pipeline_manager.pipeline.kv_cache_ends.copy_(latent_data.current_end)
 
         last_image = images[:,:,[-1]]
-        chunk_idx += 4
+        chunk_idx += 1
         current_start = current_end
         current_end += (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
         is_running = True

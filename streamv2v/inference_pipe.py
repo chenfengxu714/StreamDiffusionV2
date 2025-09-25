@@ -588,7 +588,6 @@ def main():
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=832)
     parser.add_argument("--fps", type=int, default=30)
-    parser.add_argument("--fold", action="store_true", default=False)
     parser.add_argument("--max_outstanding", type=int, default=1, help="max number of outstanding sends/recv to keep")
     parser.add_argument("--dit_fsdp", action="store_true", default=False)
     parser.add_argument("--t5_fsdp", action="store_true", default=False)
@@ -615,7 +614,6 @@ def main():
     config = OmegaConf.load(args.config_path)
     for k, v in vars(args).items():
         config[k] = v
-    # Derive denoising_step_list from step if provided
     # Always base on the canonical full list to ensure --step overrides YAML
     full_denoising_list = [700, 600, 500, 400, 0]
     step_value = args.step
