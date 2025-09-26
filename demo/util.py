@@ -43,7 +43,7 @@ def is_firefox(user_agent: str) -> bool:
     return "Firefox" in user_agent
 
 
-def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=False):
+def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=True):
     print(f"Queue size: {queue.qsize()}")
     while queue.qsize() < num_frames_needed:
         if stop_event and stop_event.is_set():

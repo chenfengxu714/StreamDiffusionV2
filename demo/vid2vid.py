@@ -187,7 +187,6 @@ def generate_process(args, prompt_dict, prepare_event, stop_event, input_queue, 
             # Prepare pipeline
             current_start = 0
             current_end = pipeline_manager.pipeline.frame_seq_length * 2
-            pipeline_manager.pipeline.init_denoising_step_list(args, device)
             if pipeline_manager.pipeline.kv_cache1 is not None:
                 pipeline_manager.pipeline.reset_kv_cache()
                 pipeline_manager.pipeline.reset_crossattn_cache()
@@ -213,7 +212,7 @@ def generate_process(args, prompt_dict, prepare_event, stop_event, input_queue, 
         images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
 
         noise_scale, current_step = compute_noise_scale_and_step(
-            input_video_original=torch.cat([last_image, images[:,:,-chunk_size:-1]], dim=2),
+            input_video_original=torch.cat([last_image, images], dim=2),
             end_idx=first_batch_num_frames,
             chunck_size=chunk_size,
             noise_scale=float(noise_scale),

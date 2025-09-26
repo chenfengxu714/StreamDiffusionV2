@@ -257,7 +257,7 @@ if __name__ == "__main__":
     else:
         from vid2vid import Pipeline
         pipeline = Pipeline(config)
-    
+
     app = App(config, pipeline).app
 
     def signal_handler(sig, frame):

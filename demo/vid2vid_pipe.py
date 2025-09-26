@@ -16,6 +16,7 @@ import torch
 import torch.distributed as dist
 
 from vid2vid import Pipeline
+from streamv2v.inference_pipe import compute_noise_scale_and_step
 
 
 class MultiGPUPipeline(Pipeline):
@@ -132,12 +133,12 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             torch.cuda.synchronize()
             start_vae = time.time()
 
-        l2_dist=(
-            images - torch.cat([last_image, images[:,:,-chunk_size:-1]], dim=2)
-        ) ** 2
-        l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-        noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
-        current_step = int(1000*noise_scale)-100
+        noise_scale, current_step = compute_noise_scale_and_step(
+            input_video_original=torch.cat([last_image, images], dim=2),
+            end_idx=first_batch_num_frames,
+            chunck_size=chunk_size,
+            noise_scale=float(noise_scale),
+        )
 
         latents = pipeline_manager.pipeline.vae.model.stream_encode(images)  # [B, 4, T, H//16, W//16] or so
         latents = latents.transpose(2,1).contiguous().to(dtype=torch.bfloat16)
