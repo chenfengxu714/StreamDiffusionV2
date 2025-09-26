@@ -16,7 +16,7 @@ export const streamId = writable<string | null>(null);
 
 let websocket: WebSocket | null = null;
 export const lcmLiveActions = {
-    async start(getStreamData: () => any[]) {
+    async start(getSreamdata: () => any[]) {
         return new Promise((resolve, reject) => {
 
             try {
@@ -45,7 +45,7 @@ export const lcmLiveActions = {
                             break;
                         case "send_frame":
                             lcmLiveStatus.set(LCMLiveStatus.SEND_FRAME);
-                            const streamData = getStreamData();
+                            const streamData = getSreamdata();
                             websocket?.send(JSON.stringify({ 
                                 status: "next_frame", 
                                 timestamp: Date.now()
