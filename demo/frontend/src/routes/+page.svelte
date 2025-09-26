@@ -53,7 +53,7 @@
     setTimeout(getQueueSize, 10000);
   }
 
-  function getStreamData() {
+  function getSreamdata() {
     if (isImageMode) {
       return [getPipelineValues(), $onFrameChangeStore?.blob];
     } else {
@@ -113,7 +113,7 @@
         }
         disabled = true;
         isStreaming = true;
-        await lcmLiveActions.start(getStreamData);
+        await lcmLiveActions.start(getSreamdata);
         disabled = false;
         toggleQueueChecker(false);
       } else {
