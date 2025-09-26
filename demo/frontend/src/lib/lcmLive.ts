@@ -15,11 +15,17 @@ export const lcmLiveStatus = writable<LCMLiveStatus>(initStatus);
 export const streamId = writable<string | null>(null);
 
 let websocket: WebSocket | null = null;
+let shouldSendRestartFlag: boolean = false;
 export const lcmLiveActions = {
     async start(getStreamData: () => any[]) {
         return new Promise((resolve, reject) => {
 
             try {
+                // If an existing websocket exists but is not open, drop it
+                if (websocket && websocket.readyState !== WebSocket.OPEN) {
+                    websocket = null;
+                }
+
                 const userId = crypto.randomUUID();
                 const websocketURL = `${window.location.protocol === "https:" ? "wss" : "ws"
                     }:${window.location.host}/api/ws/${userId}`;
@@ -41,6 +47,8 @@ export const lcmLiveActions = {
                         case "connected":
                             lcmLiveStatus.set(LCMLiveStatus.CONNECTED);
                             streamId.set(userId);
+                            // Ensure first params carry restart flag
+                            shouldSendRestartFlag = true;
                             resolve({ status: "connected", userId });
                             break;
                         case "send_frame":
@@ -51,7 +59,13 @@ export const lcmLiveActions = {
                                 timestamp: Date.now()
                             }));
                             for (const d of streamData) {
-                                this.send(d);
+                                if (typeof d === 'object' && d !== null && !(d instanceof Blob)) {
+                                    const payload = shouldSendRestartFlag ? { ...d, restart: true } : d;
+                                    this.send(payload);
+                                    shouldSendRestartFlag = false;
+                                } else {
+                                    this.send(d);
+                                }
                             }
                             break;
                         case "wait":
@@ -92,11 +106,10 @@ export const lcmLiveActions = {
         }
     },
     async stop() {
-        lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED);
-        if (websocket) {
-            websocket.close();
+        // Keep socket open; signal server to idle
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ status: "stop", timestamp: Date.now() }));
         }
-        websocket = null;
-        streamId.set(null);
+        lcmLiveStatus.set(LCMLiveStatus.WAIT);
     },
 };

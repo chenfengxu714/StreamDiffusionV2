@@ -2,7 +2,7 @@ import sys
 import os
 from omegaconf import OmegaConf
 from multiprocessing import Queue, Manager, Event, Process
-from util import read_images_from_queue, image_to_array, array_to_image
+from util import read_images_from_queue, image_to_array, array_to_image, clear_queue
 
 sys.path.append(
     os.path.join(
@@ -61,7 +61,7 @@ class Pipeline:
         
         prompt: str = Field(
             default_prompt,
-            title="Prompt",
+            title="Update your prompt here",
             field="textarea",
             id="prompt",
         )
@@ -70,6 +70,11 @@ class Pipeline:
         )
         height: int = Field(
             512, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
+        )
+        restart: bool = Field(
+            default=False,
+            title="Restart",
+            description="Restart the streaming",
         )
 
     def __init__(self, args):
@@ -102,13 +107,14 @@ class Pipeline:
         self.output_queue = Queue()
         self.prepare_event = Event()
         self.stop_event = Event()
+        self.restart_event = Event()
         self.prompt_dict = Manager().dict()
         self.prompt_dict["prompt"] = self.prompt
         self.process = Process(
-                target=generate_process,
-                args=(self.args, self.prompt_dict, self.prepare_event, self.stop_event, self.input_queue, self.output_queue),
-                daemon=True
-            )
+            target=generate_process,
+            args=(self.args, self.prompt_dict, self.prepare_event, self.restart_event, self.stop_event, self.input_queue, self.output_queue),
+            daemon=True
+        )
         self.process.start()
         self.processes = [self.process]
         self.prepare_event.wait()
@@ -120,6 +126,10 @@ class Pipeline:
         if params.prompt and self.prompt != params.prompt:
             self.prompt = params.prompt
             self.prompt_dict["prompt"] = self.prompt
+
+        if params.restart:
+            self.restart_event.set()
+            clear_queue(self.output_queue)
 
     def produce_outputs(self) -> List[Image.Image]:
         qsize = self.output_queue.qsize()
@@ -145,7 +155,7 @@ class Pipeline:
         print("Pipeline closed successfully")
 
 
-def generate_process(args, prompt_dict, prepare_event, stop_event, input_queue, output_queue):
+def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event, input_queue, output_queue):
     torch.set_grad_enabled(False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -161,8 +171,11 @@ def generate_process(args, prompt_dict, prepare_event, stop_event, input_queue, 
 
     while not stop_event.is_set():
         # Prepare first batch
-        if not is_running or prompt_dict["prompt"] != prompt:
+        if not is_running or prompt_dict["prompt"] != prompt or restart_event.is_set():
             prompt = prompt_dict["prompt"]
+            if restart_event.is_set():
+                clear_queue(input_queue)
+                restart_event.clear()
             images = read_images_from_queue(input_queue, first_batch_num_frames, device, stop_event, prefer_latest=True)
 
             noise_scale = args.noise_scale

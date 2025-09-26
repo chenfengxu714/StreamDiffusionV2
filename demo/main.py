@@ -57,7 +57,8 @@ class App:
             except ServerFullException as e:
                 logging.error(f"Server Full: {e}")
             finally:
-                await self.conn_manager.disconnect(user_id, self.pipeline)
+                # Do not block shutdown here; schedule disconnect
+                asyncio.create_task(self.conn_manager.disconnect(user_id, self.pipeline))
                 if self.produce_predictions_stop_event is not None:
                     self.produce_predictions_stop_event.set()
                 if self.produce_predictions_task is not None:
@@ -85,7 +86,14 @@ class App:
                         await self.conn_manager.disconnect(user_id, self.pipeline)
                         return
                     data = await self.conn_manager.receive_json(user_id)
-                    if data["status"] != "next_frame":
+                    # Refresh idle timer on any client control message
+                    last_time = time.time()
+                    # Handle stop/pause without closing socket: go idle and wait
+                    if data and data.get("status") == "stop":
+                        await self.conn_manager.send_json(user_id, {"status": "wait"})
+                        await asyncio.sleep(THROTTLE)
+                        continue
+                    if not data or data.get("status") != "next_frame":
                         await asyncio.sleep(THROTTLE)
                         continue
 
@@ -148,9 +156,7 @@ class App:
                     ema_frame_interval = sleep_time
                     while True:
                         queue_size = await self.conn_manager.get_output_queue_size(user_id)
-                        # print(f"Queue size: {queue_size}")
                         if queue_size > last_queue_size:
-                            # A new burst has come in
                             current_burst_time = time.time()
                             elapsed = current_burst_time - last_burst_time
 
@@ -175,7 +181,6 @@ class App:
                                 frame_time_list.append(time.time() - last_frame_time)
                                 if len(frame_time_list) > 100:
                                     frame_time_list.pop(0)
-                                # print(f"FPS: {len(frame_time_list) / sum(frame_time_list)}")
                                 last_frame_time = time.time()
                         except Exception as e:
                             print(f"Frame fetch error: {e}")
@@ -245,8 +250,6 @@ class App:
 
 if __name__ == "__main__":
     import uvicorn
-    import signal
-    import sys
 
     mp.set_start_method("spawn", force=True)
 
@@ -260,39 +263,11 @@ if __name__ == "__main__":
 
     app = App(config, pipeline).app
 
-    def signal_handler(sig, frame):
-        print("\nShutting down gracefully...")
-        pipeline.close()
-        sys.exit(0)
-
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    try:
-        uvicorn.run(
-            app,
-            host=config.host,
-            port=config.port,
-            reload=False,
-            ssl_certfile=config.ssl_certfile,
-            ssl_keyfile=config.ssl_keyfile,
-        )
-    except KeyboardInterrupt:
-        print("\nShutting down gracefully...")
-        try:
-            pipeline.close()
-        except Exception as e:
-            print(f"Error during pipeline close: {e}")
-        finally:
-            print("Exiting...")
-            import os
-            os._exit(0)
-    finally:
-        try:
-            pipeline.close()
-        except Exception as e:
-            print(f"Error during pipeline close: {e}")
-        print("Exiting...")
-        import os
-        os._exit(0)
+    uvicorn.run(
+        app,
+        host=config.host,
+        port=config.port,
+        reload=False,
+        ssl_certfile=config.ssl_certfile,
+        ssl_keyfile=config.ssl_keyfile,
+    )

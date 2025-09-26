@@ -73,6 +73,11 @@ def select_images(images, num_images: int):
     return selected_images
 
 
+def clear_queue(queue):
+    while queue.qsize() > 0:
+        queue.get()
+
+
 def image_to_array(
         image: Image.Image,
         width: int,

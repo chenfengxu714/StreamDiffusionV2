@@ -3,7 +3,7 @@ import os
 import time
 from multiprocessing import Queue, Event, Process, Manager
 from streamv2v.inference_pipe import InferencePipelineManager
-from util import read_images_from_queue
+from util import read_images_from_queue, clear_queue
 
 sys.path.append(
     os.path.join(
@@ -39,11 +39,12 @@ class MultiGPUPipeline(Pipeline):
         self.output_queue = Queue()
         self.prepare_events = [Event() for _ in range(self.args.world_size)]
         self.stop_event = Event()
+        self.restart_event = Event()
         self.prompt_dict = Manager().dict()
         self.prompt_dict["prompt"] = self.prompt
         self.p_input = Process(
                 target=input_process,
-                args=(0, self.total_block_num[0], self.args, self.prompt_dict, self.prepare_events[0], self.stop_event, self.input_queue),
+                args=(0, self.total_block_num[0], self.args, self.prompt_dict, self.prepare_events[0], self.restart_event, self.stop_event, self.input_queue),
                 daemon=True
             )
         self.p_middles = [
@@ -68,7 +69,7 @@ class MultiGPUPipeline(Pipeline):
             event.wait()
 
 
-def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event, input_queue):
+def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_event, stop_event, input_queue):
     torch.set_grad_enabled(False)
     torch.cuda.set_device(args.gpu_ids[rank])
     device = torch.device(f"cuda:{args.gpu_ids[rank]}")
@@ -86,7 +87,10 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
 
     while not stop_event.is_set():
         # Check if prompt has changed
-        if is_running and prompt_dict["prompt"] != prompt:
+        if is_running and (prompt_dict["prompt"] != prompt or restart_event.is_set()):
+            if restart_event.is_set():
+                clear_queue(input_queue)
+                restart_event.clear()
             prompt = prompt_dict["prompt"]
             # Send stop signal by chunk_idx=-1 to the other ranks
             with torch.cuda.stream(pipeline_manager.com_stream):

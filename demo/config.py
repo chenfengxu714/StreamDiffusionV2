@@ -69,8 +69,8 @@ parser.add_argument("--debug", type=bool, default=True)
 parser.add_argument("--use_multi_gpu", action="store_true", default=False)
 
 # These are only used when use_multi_gpu is True
-parser.add_argument("--world_size", type=int, default=2)
-parser.add_argument("--gpu_ids", type=list, default=[1, 2]) # size has to match world_size
+parser.add_argument("--world_size", type=int, default=3)
+parser.add_argument("--gpu_ids", type=list, default=[0, 1, 2]) # size has to match world_size
 parser.add_argument("--max_outstanding", type=int, default=2, help="max number of outstanding sends/recv to keep")
 parser.add_argument("--schedule_block", action="store_true", default=False)
 

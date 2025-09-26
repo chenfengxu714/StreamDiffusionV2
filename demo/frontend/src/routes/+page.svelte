@@ -122,8 +122,8 @@
         }
         lcmLiveActions.stop();
         isStreaming = false;
-        streamId.set(null); // <-- force output reset
-        lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED); // <-- force status reset
+        // streamId.set(null); // <-- force output reset
+        // lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED); // <-- force status reset
         toggleQueueChecker(true);
       }
     } catch (e) {
