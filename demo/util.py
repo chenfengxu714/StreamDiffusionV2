@@ -44,7 +44,7 @@ def is_firefox(user_agent: str) -> bool:
 
 
 def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=True):
-    print(f"Queue size: {queue.qsize()}")
+    # print(f"Queue size: {queue.qsize()}")
     while queue.qsize() < num_frames_needed:
         if stop_event and stop_event.is_set():
             return None
