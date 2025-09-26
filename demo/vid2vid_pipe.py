@@ -1,11 +1,9 @@
 import sys
 import os
-import numpy as np
 import time
-from omegaconf import OmegaConf
 from multiprocessing import Queue, Event, Process, Manager
 from streamv2v.inference_pipe import InferencePipelineManager
-
+from util import read_images_from_queue
 
 sys.path.append(
     os.path.join(
@@ -17,104 +15,25 @@ sys.path.append(
 import torch
 import torch.distributed as dist
 
-from config import Args
-from pydantic import BaseModel, Field
-from PIL import Image
-from typing import List
+from vid2vid import Pipeline
 
 
-default_prompt = "A panda is performing kung fu"
-
-page_content = """<h1 class="text-3xl font-bold">StreamV2V</h1>
-<p class="text-sm">
-    This demo showcases
-    <a
-    href="https://jeff-liangf.github.io/projects/streamv2v/"
-    target="_blank"
-    class="text-blue-500 underline hover:no-underline">StreamV2V
-</a>
-video-to-video pipeline using
-    <a
-    href="https://huggingface.co/latent-consistency/lcm-lora-sdv1-5"
-    target="_blank"
-    class="text-blue-500 underline hover:no-underline">4-step LCM LORA</a
-    > with a MJPEG stream server.
-</p>
-<p class="text-sm">
-The base model is <a
-href="https://huggingface.co/runwayml/stable-diffusion-v1-5"
-    target="_blank"
-    class="text-blue-500 underline hover:no-underline">SD 1.5</a
-    >. We also build in <a
-    href="https://github.com/Jeff-LiangF/streamv2v/tree/main/demo_w_camera#download-lora-weights-for-better-stylization"
-    target="_blank"
-    class="text-blue-500 underline hover:no-underline">some LORAs
-</a> for better stylization.
-</p>
-"""
-
-TAG_LATENT_HDR = 11001
-TAG_LATENT_PAY = 11002
-TAG_START_END_STEP = 11003
-TAG_PATCHED_X_SHAPE = 11004
-TAG_LATENT_ORIGIN_HDR = 11005
-TAG_LATENT_ORIGIN_PAY = 11006
-
-
-class Pipeline:
-    class Info(BaseModel):
-        name: str = "StreamV2V"
-        input_mode: str = "image"
-        page_content: str = page_content
-
-    class InputParams(BaseModel):
-        model_config = {"arbitrary_types_allowed": True}
-        
-        prompt: str = Field(
-            default_prompt,
-            title="Prompt",
-            field="textarea",
-            id="prompt",
-        )
-        width: int = Field(
-            400, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
-        )
-        height: int = Field(
-            400, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
-        )
-
-    def __init__(self, args: Args):
-        torch.set_grad_enabled(False)
-
-        params = self.InputParams()
-        config = OmegaConf.load(args.config_path)
-        for k, v in args._asdict().items():
-            config[k] = v
-        config["height"] = params.height
-        config["width"] = params.width
-
-        self.width = params.width
-        self.height = params.height
-        self.prompt = params.prompt
-        self.args = config
-
+class MultiGPUPipeline(Pipeline):
+    def prepare(self):
         total_blocks = 30
-        if args.world_size == 2:
+        if self.args.world_size == 2:
             self.total_block_num = [[0, 15], [15, total_blocks]]
         else:
-            base = total_blocks // args.world_size
-            rem = total_blocks % args.world_size
+            base = total_blocks // self.args.world_size
+            rem = total_blocks % self.args.world_size
             start = 0
             self.total_block_num = []
-            for r in range(args.world_size):
+            for r in range(self.args.world_size):
                 size = base + (1 if r < rem else 0)
-                end = start + size if r < args.world_size - 1 else total_blocks
+                end = start + size if r < self.args.world_size - 1 else total_blocks
                 self.total_block_num.append([start, end])
                 start = end
 
-        self.prepare_processes()
-
-    def prepare_processes(self):
         self.input_queue = Queue()
         self.output_queue = Queue()
         self.prepare_events = [Event() for _ in range(self.args.world_size)]
@@ -139,101 +58,19 @@ class Pipeline:
             args=(self.args.world_size - 1, self.total_block_num[-1], self.args, self.prompt_dict, self.prepare_events[-1], self.stop_event, self.output_queue),
             daemon=True
         )
+        self.processes = [self.p_input] + self.p_middles + [self.p_output]
 
-        self.p_input.start()
-        for p in self.p_middles:
+        for p in self.processes:
             p.start()
-        self.p_output.start()
 
         for event in self.prepare_events:
             event.wait()
 
-    def accept_new_params(self, params: "Pipeline.InputParams"):
-        image_array = self.image_to_array(params.image, self.width, self.height)
-        self.input_queue.put(image_array)
-
-        if params.prompt and self.prompt != params.prompt:
-            self.prompt = params.prompt
-            self.prompt_dict["prompt"] = self.prompt
-
-    def predict(self) -> List[Image.Image]:
-        qsize = self.output_queue.qsize()
-        results = []
-        for _ in range(qsize):
-            results.append(self.array_to_image(self.output_queue.get()))
-        return results
-
-    def image_to_array(
-        self, image: Image.Image,
-        width: int,
-        height: int,
-        normalize: bool = True
-    ) -> np.ndarray:
-        image = image.convert("RGB").resize((width, height))
-        image_array = np.array(image)
-        if normalize:
-            image_array = image_array / 127.5 - 1.0
-        return image_array
-
-    def array_to_image(self, image_array: np.ndarray, normalize: bool = True) -> Image.Image:
-        if normalize:
-            image_array = image_array * 255.0
-        image_array = image_array.astype(np.uint8)
-        image = Image.fromarray(image_array)
-        return image
-
-    def close(self):
-        print("Setting stop event...")
-        self.stop_event.set()
-
-        # Give processes a short time to exit gracefully
-        timeout = 1.0
-        
-        print("Waiting for input process to terminate...")
-        self.p_input.join(timeout=timeout)
-        if self.p_input.is_alive():
-            print("Input process didn't terminate gracefully, forcing termination")
-            self.p_input.terminate()
-            self.p_input.join(timeout=0.5)
-            if self.p_input.is_alive():
-                print("Force killing input process")
-                self.p_input.kill()
-        
-        print("Waiting for middle processes to terminate...")
-        for i, p in enumerate(self.p_middles):
-            p.join(timeout=timeout)
-            if p.is_alive():
-                print(f"Middle process {i} didn't terminate gracefully, forcing termination")
-                p.terminate()
-                p.join(timeout=0.5)
-                if p.is_alive():
-                    print(f"Force killing middle process {i}")
-                    p.kill()
-        
-        print("Waiting for output process to terminate...")
-        self.p_output.join(timeout=timeout)
-        if self.p_output.is_alive():
-            print("Output process didn't terminate gracefully, forcing termination")
-            self.p_output.terminate()
-            self.p_output.join(timeout=0.5)
-            if self.p_output.is_alive():
-                print("Force killing output process")
-                self.p_output.kill()
-        
-        print("Destroying process group...")
-        if dist.is_initialized():
-            try:
-                dist.destroy_process_group()
-            except Exception as e:
-                print(f"Error destroying process group: {e}")
-        
-        print("Pipeline closed successfully")
-
 
 def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event, input_queue):
     torch.set_grad_enabled(False)
-    torch.cuda.set_device(rank)
-    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(args.gpu_ids[rank])
+    device = torch.device(f"cuda:{args.gpu_ids[rank]}")
     init_dist_tcp(rank, args.world_size, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
@@ -385,8 +222,8 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
 
 def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event, output_queue):
     torch.set_grad_enabled(False)
-    torch.cuda.set_device(rank)
-    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(args.gpu_ids[rank])
+    device = torch.device(f"cuda:{args.gpu_ids[rank]}")
     init_dist_tcp(rank, args.world_size, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
     
@@ -505,8 +342,8 @@ def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
 
 def middle_process(rank, block_num, args, prompt_dict, prepare_event, stop_event):
     torch.set_grad_enabled(False)
-    torch.cuda.set_device(rank)
-    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(args.gpu_ids[rank])
+    device = torch.device(f"cuda:{args.gpu_ids[rank]}")
     init_dist_tcp(rank, args.world_size, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
     
@@ -630,39 +467,6 @@ def prepare_pipeline(args, device, rank, world_size):
     pipeline_manager = InferencePipelineManager(args, device, rank, world_size)
     pipeline_manager.load_model(args.checkpoint_folder)
     return pipeline_manager
-
-
-def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=False):
-    print(f"Queue size: {queue.qsize()}")
-    while queue.qsize() < num_frames_needed:
-        if stop_event and stop_event.is_set():
-            return None
-        time.sleep(0.1)
-
-    if prefer_latest:
-        read_size = queue.qsize()
-    else:
-        read_size = min(queue.qsize(), num_frames_needed * 2)
-    images = []
-    for _ in range(read_size):
-        images.append(queue.get())
-
-    if prefer_latest:
-        images = np.stack(images[-num_frames_needed:], axis=0)
-    else:
-        images = select_images(images, num_frames_needed)
-    images = torch.from_numpy(images).unsqueeze(0)
-    images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=device)
-    return images
-
-
-def select_images(images, num_images: int):
-    if len(images) < num_images:
-        return []
-    step = len(images) / (num_images - 1)
-    indices = [int(i * step) for i in range(num_images - 1)] + [-1]
-    selected_images = np.stack([images[i] for i in indices], axis=0)
-    return selected_images
 
 
 def init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num):

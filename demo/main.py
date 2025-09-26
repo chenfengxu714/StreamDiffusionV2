@@ -14,13 +14,12 @@ import asyncio
 import os
 import time
 import mimetypes
-import torch
 import threading
+import multiprocessing as mp
 
 from config import config, Args
 from util import pil_to_frame, bytes_to_pil, is_firefox
 from connection_manager import ConnectionManager, ServerFullException
-from vid2vid import Pipeline
 
 # fix mime error on windows
 mimetypes.add_type("application/javascript", ".js")
@@ -143,12 +142,13 @@ class App:
                     last_queue_size = 0
                     sleep_time = 1 / 20  # Initial guess
                     last_frame_time = None
+                    frame_time_list = []
 
                     # Initialize moving average frame interval
                     ema_frame_interval = sleep_time
                     while True:
                         queue_size = await self.conn_manager.get_output_queue_size(user_id)
-                        print(f"Queue size: {queue_size}")
+                        # print(f"Queue size: {queue_size}")
                         if queue_size > last_queue_size:
                             # A new burst has come in
                             current_burst_time = time.time()
@@ -172,7 +172,10 @@ class App:
                             if last_frame_time is None:
                                 last_frame_time = time.time()
                             else:
-                                # print(f"Frame time: {time.time() - last_frame_time}")
+                                frame_time_list.append(time.time() - last_frame_time)
+                                if len(frame_time_list) > 100:
+                                    frame_time_list.pop(0)
+                                # print(f"FPS: {len(frame_time_list) / sum(frame_time_list)}")
                                 last_frame_time = time.time()
                         except Exception as e:
                             print(f"Frame fetch error: {e}")
@@ -182,7 +185,7 @@ class App:
 
                 def produce_predictions(user_id, loop, stop_event):
                     while not stop_event.is_set():
-                        images = self.pipeline.predict()
+                        images = self.pipeline.produce_outputs()
                         if len(images) == 0:
                             time.sleep(THROTTLE)
                             continue
@@ -240,25 +243,56 @@ class App:
         )
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-_pipeline = None
-def get_pipeline():
-    global _pipeline
-    if _pipeline is None:
-        _pipeline = Pipeline(config, device)
-    return _pipeline
-
-app = App(config, get_pipeline()).app
-
 if __name__ == "__main__":
     import uvicorn
+    import signal
+    import sys
 
-    uvicorn.run(
-        app,
-        host=config.host,
-        port=config.port,
-        reload=False,
-        ssl_certfile=config.ssl_certfile,
-        ssl_keyfile=config.ssl_keyfile,
-    )
+    mp.set_start_method("spawn", force=True)
+
+    config.pretty_print()
+    if config.use_multi_gpu:
+        from vid2vid_pipe import MultiGPUPipeline
+        pipeline = MultiGPUPipeline(config)
+    else:
+        from vid2vid import Pipeline
+        pipeline = Pipeline(config)
+    
+    app = App(config, pipeline).app
+
+    def signal_handler(sig, frame):
+        print("\nShutting down gracefully...")
+        pipeline.close()
+        sys.exit(0)
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        uvicorn.run(
+            app,
+            host=config.host,
+            port=config.port,
+            reload=False,
+            ssl_certfile=config.ssl_certfile,
+            ssl_keyfile=config.ssl_keyfile,
+        )
+    except KeyboardInterrupt:
+        print("\nShutting down gracefully...")
+        try:
+            pipeline.close()
+        except Exception as e:
+            print(f"Error during pipeline close: {e}")
+        finally:
+            print("Exiting...")
+            import os
+            os._exit(0)
+    finally:
+        try:
+            pipeline.close()
+        except Exception as e:
+            print(f"Error during pipeline close: {e}")
+        print("Exiting...")
+        import os
+        os._exit(0)

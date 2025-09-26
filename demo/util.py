@@ -1,9 +1,10 @@
 from importlib import import_module
 from types import ModuleType
-from typing import Dict, Any
-from pydantic import BaseModel as PydanticBaseModel, Field
 from PIL import Image
 import io
+import time
+import numpy as np
+import torch
 
 
 def get_pipeline_class(pipeline_name: str) -> ModuleType:
@@ -40,3 +41,54 @@ def pil_to_frame(image: Image.Image) -> bytes:
 
 def is_firefox(user_agent: str) -> bool:
     return "Firefox" in user_agent
+
+
+def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=False):
+    print(f"Queue size: {queue.qsize()}")
+    while queue.qsize() < num_frames_needed:
+        if stop_event and stop_event.is_set():
+            return None
+        time.sleep(0.1)
+
+    read_size = queue.qsize()
+    images = []
+    for _ in range(read_size):
+        images.append(queue.get())
+
+    if prefer_latest:
+        images = np.stack(images[-num_frames_needed:], axis=0)
+    else:
+        images = select_images(images, num_frames_needed)
+    images = torch.from_numpy(images).unsqueeze(0)
+    images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=device)
+    return images
+
+
+def select_images(images, num_images: int):
+    if len(images) < num_images:
+        return []
+    step = len(images) / (num_images - 1)
+    indices = [int(i * step) for i in range(num_images - 1)] + [-1]
+    selected_images = np.stack([images[i] for i in indices], axis=0)
+    return selected_images
+
+
+def image_to_array(
+        image: Image.Image,
+        width: int,
+        height: int,
+        normalize: bool = True
+    ) -> np.ndarray:
+        image = image.convert("RGB").resize((width, height))
+        image_array = np.array(image)
+        if normalize:
+            image_array = image_array / 127.5 - 1.0
+        return image_array
+
+
+def array_to_image(image_array: np.ndarray, normalize: bool = True) -> Image.Image:
+    if normalize:
+        image_array = image_array * 255.0
+    image_array = image_array.astype(np.uint8)
+    image = Image.fromarray(image_array)
+    return image

@@ -1,12 +1,8 @@
-from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
-
 import sys
 import os
-import numpy as np
-import time
-import threading
 from omegaconf import OmegaConf
-import random
+from multiprocessing import Queue, Manager, Event, Process
+from util import read_images_from_queue, image_to_array, array_to_image
 
 sys.path.append(
     os.path.join(
@@ -16,15 +12,14 @@ sys.path.append(
 )
 
 import torch
-import torch.distributed as dist
 
-from config import Args
 from pydantic import BaseModel, Field
 from PIL import Image
 from typing import List
+from streamv2v.inference import SingleGPUInferencePipeline
 
 
-default_prompt = "A dog is walking"
+default_prompt = "A panda is talking vividly"
 
 page_content = """<h1 class="text-3xl font-bold">StreamV2V</h1>
 <p class="text-sm">
@@ -70,13 +65,13 @@ class Pipeline:
             id="prompt",
         )
         width: int = Field(
-            400, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
+            512, min=2, max=15, title="Width", disabled=True, hide=True, id="width"
         )
         height: int = Field(
-            400, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
+            512, min=2, max=15, title="Height", disabled=True, hide=True, id="height"
         )
 
-    def __init__(self, args: Args, device: torch.device):
+    def __init__(self, args):
         torch.set_grad_enabled(False)
 
         params = self.InputParams()
@@ -86,132 +81,160 @@ class Pipeline:
         config["height"] = params.height
         config["width"] = params.width
 
-        self.device = device
-        self.pipeline = CausalStreamInferencePipeline(config, device=device)
-        self.pipeline.to(device=device, dtype=torch.bfloat16)
-
-        state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")[
-            'generator']
-
-        self.pipeline.generator.load_state_dict(
-            state_dict, strict=True
-        )
-
-        self.chunk_size = 4
-        self.start_chunk_size = 5
-        self.first_batch = True
-        self.overlap = args.overlap
-        self.width = params.width
-        self.height = params.height
+        full_denoising_list = [700, 600, 500, 400, 0]
+        step_value = config.step
+        if step_value <= 1:
+            config.denoising_step_list = [700, 0]
+        elif step_value == 2:
+            config.denoising_step_list = [700, 500, 0]
+        elif step_value == 3:
+            config.denoising_step_list = [700, 600, 400, 0]
+        else:
+            config.denoising_step_list = full_denoising_list
 
         self.prompt = params.prompt
-        self.noise_scale = args.noise_scale
-        self.pipeline.prepare(noise=torch.zeros(1, 1).to(self.device, dtype=torch.bfloat16), text_prompts=[self.prompt])
-        self.images = []
-        self.prevs = []
-        self.current_start = 0
-        self.current_end = self.pipeline.frame_seq_length * 2
+        self.args = config
+        self.prepare()
 
-        self.images_lock = threading.Lock()
-        self.model_lock = threading.Lock()
+    def prepare(self):
+        self.input_queue = Queue()
+        self.output_queue = Queue()
+        self.prepare_event = Event()
+        self.stop_event = Event()
+        self.prompt_dict = Manager().dict()
+        self.prompt_dict["prompt"] = self.prompt
+        self.process = Process(
+                target=generate_process,
+                args=(self.args, self.prompt_dict, self.prepare_event, self.stop_event, self.input_queue, self.output_queue),
+                daemon=True
+            )
+        self.process.start()
+        self.processes = [self.process]
+        self.prepare_event.wait()
 
     def accept_new_params(self, params: "Pipeline.InputParams"):
-        image_array = self.image_to_array(params.image, self.width, self.height)
-        with self.images_lock:
-            self.images.append(image_array)
+        image_array = image_to_array(params.image, self.args.width, self.args.height)
+        self.input_queue.put(image_array)
 
         if params.prompt and self.prompt != params.prompt:
-            self.update_prompt(params.prompt)
+            self.prompt = params.prompt
+            self.prompt_dict["prompt"] = self.prompt
 
-    def update_prompt(self, prompt: str):
-        self.prompt = prompt
-        with self.model_lock:
-            self.pipeline.prepare(noise=torch.zeros(1, 1).to(self.device, dtype=torch.bfloat16), text_prompts=[self.prompt])
-            self.pipeline.vae.model.first_batch = True
-            self.current_start = 0
-            self.current_end = self.pipeline.frame_seq_length * 2
-            self.first_batch = True
-            self.prevs = []
+    def produce_outputs(self) -> List[Image.Image]:
+        qsize = self.output_queue.qsize()
+        results = []
+        for _ in range(qsize):
+            results.append(array_to_image(self.output_queue.get()))
+        return results
 
-    def clear_images(self):
-        with self.images_lock:
-            self.images = []
-        with self.model_lock:
-            self.prevs = []
-            self.first_batch = True
-            self.current_start = 0
-            self.current_end = self.pipeline.frame_seq_length * 2
+    def close(self):
+        print("Setting stop event...")
+        self.stop_event.set()
 
-    def predict(self) -> List[Image.Image]:
-        # time_start = time.time()
-        with self.model_lock:
-            num_frames_needed = self.start_chunk_size if self.first_batch else self.chunk_size
-            with self.images_lock:
-                images = self.read_images(num_frames_needed)
-            if len(images) == 0:
-                return []
+        print("Waiting for processes to terminate...")
+        for i, process in enumerate(self.processes):
+            process.join(timeout=1.0)
+            if process.is_alive():
+                print(f"Process {i} didn't terminate gracefully, forcing termination")
+                process.terminate()
+                process.join(timeout=0.5)
+                if process.is_alive():
+                    print(f"Force killing process {i}")
+                    process.kill()
+        print("Pipeline closed successfully")
 
-            torch.set_grad_enabled(False)
-            if len(self.prevs) > 0:
-                total_images = np.concatenate([self.prevs, images], axis=0)
-            else:
-                total_images = images
-            if self.overlap > 0:
-                self.prevs = total_images[-self.overlap:]
 
-            images = torch.from_numpy(images).unsqueeze(0)
-            images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=self.device)
+def generate_process(args, prompt_dict, prepare_event, stop_event, input_queue, output_queue):
+    torch.set_grad_enabled(False)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-            latents = self.pipeline.vae.model.stream_encode(images)
-            latents = latents.transpose(2,1)
+    pipeline_manager = SingleGPUInferencePipeline(args, device)
+    pipeline_manager.load_model(args.checkpoint_folder)
+    num_steps = len(pipeline_manager.pipeline.denoising_step_list)
+    first_batch_num_frames = 5
+    chunk_size = 4
+    is_running = False
+    prompt = prompt_dict["prompt"]
+
+    prepare_event.set()
+
+    while not stop_event.is_set():
+        # Prepare first batch
+        if not is_running or prompt_dict["prompt"] != prompt:
+            prompt = prompt_dict["prompt"]
+            images = read_images_from_queue(input_queue, first_batch_num_frames, device, stop_event, prefer_latest=True)
+
+            noise_scale = args.noise_scale
+            l2_dist = (images[:,:,-first_batch_num_frames:-1]-images[:,:,-first_batch_num_frames+1:])**2
+            l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
+            noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
+            current_step = int(1000*noise_scale)-100
+
+            pipeline_manager.pipeline.vae.model.first_encode = True
+            pipeline_manager.pipeline.vae.model.first_decode = True
+            latents = pipeline_manager.pipeline.vae.model.stream_encode(images)
+            latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
             noise = torch.randn_like(latents)
-            latents = noise * self.noise_scale + latents * (1 - self.noise_scale)
+            noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
 
-            with torch.inference_mode():
-                video = self.pipeline.inference(
-                    noise=latents,
-                    current_start=self.current_start,
-                    current_end=self.current_end,
-                )
-            self.current_start = self.current_end
-            self.current_end += (self.chunk_size // 4) * self.pipeline.frame_seq_length
-            self.first_batch = False
-            # images = (images + 1) * 127.5
-            # video = torch.from_numpy(images).permute(0, 3, 1, 2).unsqueeze(0)
-            # random_sleep = random.uniform(0.3, 0.5)
-            # time.sleep(random_sleep)
+            # Prepare pipeline
+            current_start = 0
+            current_end = pipeline_manager.pipeline.frame_seq_length * 2
+            pipeline_manager.pipeline.init_denoising_step_list(args, device)
+            if pipeline_manager.pipeline.kv_cache1 is not None:
+                pipeline_manager.pipeline.reset_kv_cache()
+                pipeline_manager.pipeline.reset_crossattn_cache()
+            denoised_pred = pipeline_manager.prepare_pipeline(
+                text_prompts=[prompt],
+                noise=noisy_latents,
+                current_start=current_start,
+                current_end=current_end
+            )
 
-        video = video[0].permute(0, 2, 3, 1).cpu().numpy()
+            video = pipeline_manager.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+            video = (video * 0.5 + 0.5).clamp(0, 1)
+            video = video[0].permute(0, 2, 3, 1).contiguous()
+            for image in video.cpu().float().numpy():
+                output_queue.put(image)
 
-        # time_end = time.time()
-        # print(f"FPS model: {len(video) / (time_end - time_start)}")
-        return [self.array_to_image(image) for image in video[self.overlap:]]
+            current_start = current_end
+            current_end += (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+            last_image = images[:,:,[-1]]
+            processed = 0
+            is_running = True
 
-    def read_images(self, num_images: int):
-        if len(self.images) + len(self.prevs) >= num_images:
-            step = len(self.images) / (num_images - 1)
-            indices = [int(i * step) for i in range(num_images - 1)] + [-1]
-            images = np.stack([self.images[i] for i in indices], axis=0)
-            self.images = []
-            return images
-        else:
-            return []
+        images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
 
-    def image_to_array(
-        self, image: Image.Image,
-        width: int,
-        height: int,
-        normalize: bool = True
-    ) -> np.ndarray:
-        image = image.convert("RGB").resize((width, height))
-        image_array = np.array(image)
-        if normalize:
-            image_array = image_array / 127.5 - 1.0
-        return image_array
+        l2_dist=(
+            images - torch.cat([last_image, images[:,:,-chunk_size:-1]], dim=2)
+        ) ** 2
+        l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
+        noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
+        current_step = int(1000*noise_scale)-100
 
-    def array_to_image(self, image_array: np.ndarray, normalize: bool = True) -> Image.Image:
-        if normalize:
-            image_array = image_array * 255.0
-        image_array = image_array.astype(np.uint8)
-        image = Image.fromarray(image_array)
-        return image
+        latents = pipeline_manager.pipeline.vae.model.stream_encode(images)
+        latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
+        noise = torch.randn_like(latents)
+        noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
+
+        denoised_pred = pipeline_manager.pipeline.inference_stream(
+            noise=noisy_latents,
+            current_start=current_start,
+            current_end=current_end,
+            current_step=current_step,
+        )
+
+        processed += 1
+        
+        # VAE decoding - only start decoding after num_steps
+        if processed >= num_steps:
+            video = pipeline_manager.pipeline.vae.stream_decode_to_pixel(denoised_pred[[-1]])
+            video = (video * 0.5 + 0.5).clamp(0, 1)
+            video = video[0].permute(0, 2, 3, 1).contiguous()
+            # Update timing
+            for image in video.cpu().float().numpy():
+                output_queue.put(image)
+
+        current_start = current_end
+        current_end += (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+        last_image = images[:,:,[-1]]

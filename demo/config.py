@@ -12,11 +12,14 @@ class Args(NamedTuple):
     ssl_keyfile: str
     config_path: str
     checkpoint_folder: str
+    step: int
     noise_scale: float
-    overlap: int
-    num_kv_cache: int
-    unfold: bool
     debug: bool
+    use_multi_gpu: bool
+    world_size: int
+    gpu_ids: list[int]
+    max_outstanding: int
+    schedule_block: bool
 
     def pretty_print(self):
         print("\n")
@@ -56,13 +59,19 @@ parser.add_argument(
     help="SSL keyfile",
 )
 parser.add_argument("--timeout", type=float, default=TIMEOUT, help="Timeout")
+
+# This is the default config for the pipeline, it can be overridden by the command line arguments
 parser.add_argument("--config_path", type=str, default="../configs/wan_causal_dmd_v2v.yaml")
 parser.add_argument("--checkpoint_folder", type=str, default="../ckpts/wan_causal_dmd_v2v")
+parser.add_argument("--step", type=int, default=1)
 parser.add_argument("--noise_scale", type=float, default=0.8)
-parser.add_argument("--overlap", type=int, default=0)
-parser.add_argument("--num_kv_cache", type=int, default=30)
-parser.add_argument("--unfold", action="store_true", default=False)
 parser.add_argument("--debug", type=bool, default=True)
+parser.add_argument("--use_multi_gpu", action="store_true", default=False)
+
+# These are only used when use_multi_gpu is True
+parser.add_argument("--world_size", type=int, default=2)
+parser.add_argument("--gpu_ids", type=list, default=[1, 2]) # size has to match world_size
+parser.add_argument("--max_outstanding", type=int, default=2, help="max number of outstanding sends/recv to keep")
+parser.add_argument("--schedule_block", action="store_true", default=False)
 
 config = Args(**vars(parser.parse_args()))
-config.pretty_print()
