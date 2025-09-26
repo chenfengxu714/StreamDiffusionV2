@@ -17,9 +17,10 @@ from pydantic import BaseModel, Field
 from PIL import Image
 from typing import List
 from streamv2v.inference import SingleGPUInferencePipeline
+from streamv2v.inference import compute_noise_scale_and_step
 
 
-default_prompt = "A panda is talking vividly"
+default_prompt = "Anime style, a young beautiful girl speaking directly to the camera. She has big sparkling eyes, soft long hair flowing gently, and a bright, pure smile. The scene is full of light and warmth, with cherry blossoms floating in the background under a clear blue sky. Soft pastel colors, clean outlines, and a refreshing, heartwarming atmosphere, in Japanese anime aesthetic."
 
 page_content = """<h1 class="text-3xl font-bold">StreamV2V</h1>
 <p class="text-sm">
@@ -165,13 +166,19 @@ def generate_process(args, prompt_dict, prepare_event, stop_event, input_queue, 
             images = read_images_from_queue(input_queue, first_batch_num_frames, device, stop_event, prefer_latest=True)
 
             noise_scale = args.noise_scale
-            l2_dist = (images[:,:,-first_batch_num_frames:-1]-images[:,:,-first_batch_num_frames+1:])**2
-            l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-            noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
-            current_step = int(1000*noise_scale)-100
+            noise_scale, current_step = compute_noise_scale_and_step(
+                input_video_original=images,
+                end_idx=first_batch_num_frames,
+                chunck_size=chunk_size,
+                noise_scale=float(noise_scale),
+            )
 
             pipeline_manager.pipeline.vae.model.first_encode = True
             pipeline_manager.pipeline.vae.model.first_decode = True
+            pipeline_manager.pipeline.kv_cache1 = None
+            pipeline_manager.pipeline.crossattn_cache = None
+            pipeline_manager.pipeline.block_x = None
+            pipeline_manager.pipeline.hidden_states = None
             latents = pipeline_manager.pipeline.vae.model.stream_encode(images)
             latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
             noise = torch.randn_like(latents)
@@ -205,12 +212,12 @@ def generate_process(args, prompt_dict, prepare_event, stop_event, input_queue, 
 
         images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
 
-        l2_dist=(
-            images - torch.cat([last_image, images[:,:,-chunk_size:-1]], dim=2)
-        ) ** 2
-        l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-        noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
-        current_step = int(1000*noise_scale)-100
+        noise_scale, current_step = compute_noise_scale_and_step(
+            input_video_original=torch.cat([last_image, images[:,:,-chunk_size:-1]], dim=2),
+            end_idx=first_batch_num_frames,
+            chunck_size=chunk_size,
+            noise_scale=float(noise_scale),
+        )
 
         latents = pipeline_manager.pipeline.vae.model.stream_encode(images)
         latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)

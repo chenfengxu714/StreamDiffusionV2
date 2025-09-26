@@ -475,7 +475,6 @@ def prepare_pipeline(args, device, rank, world_size):
 
 def init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num):
     pipeline_manager.pipeline.vae.model.first_encode = True
-    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
     pipeline_manager.pipeline.crossattn_cache = None
     pipeline_manager.pipeline.block_x = None
@@ -509,7 +508,6 @@ def init_first_batch_for_input_process(args, device, pipeline_manager, images, p
 
 def init_first_batch_for_output_process(args, device, pipeline_manager, prompt, block_num):
     pipeline_manager.pipeline.vae.model.first_decode = True
-    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
     pipeline_manager.pipeline.crossattn_cache = None
     pipeline_manager.pipeline.block_x = None
@@ -547,8 +545,10 @@ def init_first_batch_for_output_process(args, device, pipeline_manager, prompt, 
 
 
 def init_first_batch_for_middle_process(args, device, pipeline_manager, prompt, block_num):
-    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
+    pipeline_manager.pipeline.crossattn_cache = None
+    pipeline_manager.pipeline.block_x = None
+    pipeline_manager.pipeline.hidden_states = None
     pipeline_manager.processed = 0
     # Other ranks receive shape info first
     latents_shape = torch.zeros(5, dtype=torch.int64, device=device)

@@ -48,7 +48,7 @@ def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, pr
     while queue.qsize() < num_frames_needed:
         if stop_event and stop_event.is_set():
             return None
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     read_size = queue.qsize()
     images = []
