@@ -220,6 +220,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         return denoised_pred
     
     def inference_stream(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
+
         self.hidden_states[1:] = self.hidden_states[:-1].clone()
         self.hidden_states[0] = noise[0]
 
@@ -270,7 +271,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.hidden_states.copy_(noise)
             self.kv_cache_starts.copy_(current_start)
             self.kv_cache_ends.copy_(current_end)
-        
+
         self.timestep[0] = current_step
         
         if block_mode == 'output':

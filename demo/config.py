@@ -15,7 +15,6 @@ class Args(NamedTuple):
     noise_scale: float
     overlap: int
     num_kv_cache: int
-    unfold: bool
     debug: bool
 
     def pretty_print(self):
@@ -60,8 +59,7 @@ parser.add_argument("--config_path", type=str, default="../configs/wan_causal_dm
 parser.add_argument("--checkpoint_folder", type=str, default="../ckpts/wan_causal_dmd_v2v")
 parser.add_argument("--noise_scale", type=float, default=0.8)
 parser.add_argument("--overlap", type=int, default=0)
-parser.add_argument("--num_kv_cache", type=int, default=30)
-parser.add_argument("--unfold", action="store_true", default=False)
+parser.add_argument("--num_kv_cache", type=int, default=6)
 parser.add_argument("--debug", type=bool, default=True)
 
 config = Args(**vars(parser.parse_args()))

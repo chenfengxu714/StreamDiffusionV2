@@ -23,7 +23,7 @@ from PIL import Image
 from typing import List
 
 
-default_prompt = "A panda is performing kung fu"
+default_prompt = "Anime style, a young beautiful girl speaking directly to the camera. She has big sparkling eyes, soft long hair flowing gently, and a bright, pure smile. The scene is full of light and warmth, with cherry blossoms floating in the background under a clear blue sky. Soft pastel colors, clean outlines, and a refreshing, heartwarming atmosphere, in Japanese anime aesthetic."
 
 page_content = """<h1 class="text-3xl font-bold">StreamV2V</h1>
 <p class="text-sm">
@@ -282,8 +282,12 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             last_image = images[:,:,[-1]]
             outstanding = []
             pipeline_manager.logger.info(f"Starting rank {rank} inference loop")
+        
+        if current_start//pipeline_manager.pipeline.frame_seq_length >= 50:
+            current_start = pipeline_manager.pipeline.kv_cache_length - pipeline_manager.pipeline.frame_seq_length
+            current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
 
-        images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
+        images = read_images_from_queue(input_queue, chunk_size, device, stop_event, prefer_latest=True)
         if images is None:
             break
 
@@ -637,7 +641,7 @@ def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, pr
     while queue.qsize() < num_frames_needed:
         if stop_event and stop_event.is_set():
             return None
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     if prefer_latest:
         read_size = queue.qsize()
@@ -667,8 +671,13 @@ def select_images(images, num_images: int):
 
 def init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num):
     pipeline_manager.pipeline.vae.model.first_encode = True
-    pipeline_manager.pipeline._init_denoising_step_list(args, device)
+    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
+    pipeline_manager.pipeline.crossattn_cache = None
+    pipeline_manager.pipeline.block_x = None
+    pipeline_manager.pipeline.hidden_states = None
+    torch.cuda.empty_cache()
+
     pipeline_manager.processed = 0
     latents = pipeline_manager.pipeline.vae.model.stream_encode(images)
     latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
@@ -696,8 +705,13 @@ def init_first_batch_for_input_process(args, device, pipeline_manager, images, p
 
 def init_first_batch_for_output_process(args, device, pipeline_manager, prompt, block_num):
     pipeline_manager.pipeline.vae.model.first_decode = True
-    pipeline_manager.pipeline._init_denoising_step_list(args, device)
+    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
+    pipeline_manager.pipeline.crossattn_cache = None
+    pipeline_manager.pipeline.block_x = None
+    pipeline_manager.pipeline.hidden_states = None
+    torch.cuda.empty_cache()
+
     pipeline_manager.processed = 0
     # Other ranks receive shape info first
     latents_shape = torch.zeros(5, dtype=torch.int64, device=device)
@@ -729,7 +743,7 @@ def init_first_batch_for_output_process(args, device, pipeline_manager, prompt, 
 
 
 def init_first_batch_for_middle_process(args, device, pipeline_manager, prompt, block_num):
-    pipeline_manager.pipeline._init_denoising_step_list(args, device)
+    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
     pipeline_manager.processed = 0
     # Other ranks receive shape info first
