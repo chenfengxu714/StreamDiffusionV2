@@ -119,8 +119,12 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, stop_event,
             last_image = images[:,:,[-1]]
             outstanding = []
             pipeline_manager.logger.info(f"Starting rank {rank} inference loop")
+        
+        if current_start//pipeline_manager.pipeline.frame_seq_length >= 50:
+            current_start = pipeline_manager.pipeline.kv_cache_length - pipeline_manager.pipeline.frame_seq_length
+            current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
 
-        images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
+        images = read_images_from_queue(input_queue, chunk_size, device, stop_event, prefer_latest=True)
         if images is None:
             break
 
@@ -471,8 +475,13 @@ def prepare_pipeline(args, device, rank, world_size):
 
 def init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num):
     pipeline_manager.pipeline.vae.model.first_encode = True
-    pipeline_manager.pipeline._init_denoising_step_list(args, device)
+    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
+    pipeline_manager.pipeline.crossattn_cache = None
+    pipeline_manager.pipeline.block_x = None
+    pipeline_manager.pipeline.hidden_states = None
+    torch.cuda.empty_cache()
+
     pipeline_manager.processed = 0
     latents = pipeline_manager.pipeline.vae.model.stream_encode(images)
     latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
@@ -500,8 +509,13 @@ def init_first_batch_for_input_process(args, device, pipeline_manager, images, p
 
 def init_first_batch_for_output_process(args, device, pipeline_manager, prompt, block_num):
     pipeline_manager.pipeline.vae.model.first_decode = True
-    pipeline_manager.pipeline._init_denoising_step_list(args, device)
+    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
+    pipeline_manager.pipeline.crossattn_cache = None
+    pipeline_manager.pipeline.block_x = None
+    pipeline_manager.pipeline.hidden_states = None
+    torch.cuda.empty_cache()
+
     pipeline_manager.processed = 0
     # Other ranks receive shape info first
     latents_shape = torch.zeros(5, dtype=torch.int64, device=device)
@@ -533,7 +547,7 @@ def init_first_batch_for_output_process(args, device, pipeline_manager, prompt, 
 
 
 def init_first_batch_for_middle_process(args, device, pipeline_manager, prompt, block_num):
-    pipeline_manager.pipeline._init_denoising_step_list(args, device)
+    # pipeline_manager.pipeline._init_denoising_step_list(args, device)
     pipeline_manager.pipeline.kv_cache1 = None
     pipeline_manager.processed = 0
     # Other ranks receive shape info first

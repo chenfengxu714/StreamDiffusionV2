@@ -151,6 +151,9 @@ class CausalWanSelfAttention(nn.Module):
                 # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
                 kv_cache_size = kv_cache["k"].shape[1]
                 num_new_tokens = roped_query.shape[1]
+                if c_start + num_new_tokens == kv_cache_size:
+                    kv_cache["global_end_index"][i].fill_(c_start)
+                    kv_cache["local_end_index"][i].fill_(c_start)
                 if (current_end > kv_cache["global_end_index"][i].item()) and (
                         num_new_tokens + kv_cache["local_end_index"][i].item() > kv_cache_size):
                     # Calculate the number of new tokens added in this step

@@ -15,11 +15,9 @@ class Args(NamedTuple):
     noise_scale: float
     overlap: int
     num_kv_cache: int
-    unfold: bool
     debug: bool
     world_size: int
     max_outstanding: int
-    fold: bool
     schedule_block: bool
 
     def pretty_print(self):
@@ -64,12 +62,10 @@ parser.add_argument("--config_path", type=str, default="../configs/wan_causal_dm
 parser.add_argument("--checkpoint_folder", type=str, default="../ckpts/wan_causal_dmd_v2v")
 parser.add_argument("--noise_scale", type=float, default=0.8)
 parser.add_argument("--overlap", type=int, default=0)
-parser.add_argument("--num_kv_cache", type=int, default=30)
-parser.add_argument("--unfold", action="store_true", default=False)
+parser.add_argument("--num_kv_cache", type=int, default=6)
 parser.add_argument("--debug", type=bool, default=True)
 parser.add_argument("--world_size", type=int, default=2)
 parser.add_argument("--max_outstanding", type=int, default=2, help="max number of outstanding sends/recv to keep")
-parser.add_argument("--fold", action="store_true", default=False)
 parser.add_argument("--schedule_block", action="store_true", default=False)
 
 config = Args(**vars(parser.parse_args()))
