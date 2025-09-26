@@ -22,31 +22,15 @@ from streamv2v.inference import compute_noise_scale_and_step
 
 default_prompt = "Anime style, a young beautiful girl speaking directly to the camera. She has big sparkling eyes, soft long hair flowing gently, and a bright, pure smile. The scene is full of light and warmth, with cherry blossoms floating in the background under a clear blue sky. Soft pastel colors, clean outlines, and a refreshing, heartwarming atmosphere, in Japanese anime aesthetic."
 
-page_content = """<h1 class="text-3xl font-bold">StreamV2V</h1>
+page_content = """<h1 class="text-3xl font-bold">StreamDiffusionV2</h1>
 <p class="text-sm">
     This demo showcases
     <a
-    href="https://jeff-liangf.github.io/projects/streamv2v/"
+    href="https://streamdiffusionv2.github.io/"
     target="_blank"
-    class="text-blue-500 underline hover:no-underline">StreamV2V
+    class="text-blue-500 underline hover:no-underline">StreamDiffusionV2
 </a>
-video-to-video pipeline using
-    <a
-    href="https://huggingface.co/latent-consistency/lcm-lora-sdv1-5"
-    target="_blank"
-    class="text-blue-500 underline hover:no-underline">4-step LCM LORA</a
-    > with a MJPEG stream server.
-</p>
-<p class="text-sm">
-The base model is <a
-href="https://huggingface.co/runwayml/stable-diffusion-v1-5"
-    target="_blank"
-    class="text-blue-500 underline hover:no-underline">SD 1.5</a
-    >. We also build in <a
-    href="https://github.com/Jeff-LiangF/streamv2v/tree/main/demo_w_camera#download-lora-weights-for-better-stylization"
-    target="_blank"
-    class="text-blue-500 underline hover:no-underline">some LORAs
-</a> for better stylization.
+video-to-video pipeline with a MJPEG stream server.
 </p>
 """
 

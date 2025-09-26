@@ -155,6 +155,11 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             start_dit = time.time()
             t_vae = start_dit - start_vae
 
+        if pipeline_manager.processed >= pipeline_manager.world_size:
+            pipeline_manager.pipeline.hidden_states.copy_(latent_data.original_latents)
+            pipeline_manager.pipeline.kv_cache_starts.copy_(latent_data.current_start)
+            pipeline_manager.pipeline.kv_cache_ends.copy_(latent_data.current_end)
+
         denoised_pred, patched_x_shape = pipeline_manager.pipeline.inference(
             noise=noisy_latents, # [1, 4, 16, 16, 60]
             current_start=current_start,
@@ -178,7 +183,17 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
         with torch.cuda.stream(pipeline_manager.com_stream):
             if pipeline_manager.processed >= pipeline_manager.world_size:
                 # Receive data from previous rank
-                # pipeline_manager.logger.info(f"Rank {rank} receiving data")
+                if 'latent_data' in locals():
+                    pipeline_manager.buffer_manager.return_buffer(latent_data.latents, "latent")
+                    pipeline_manager.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+
+                    if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                        pipeline_manager.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                    if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                        pipeline_manager.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                    if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                        pipeline_manager.buffer_manager.return_buffer(latent_data.current_end, "misc")
+
                 latent_data = pipeline_manager.data_transfer.receive_latent_data_async(num_steps)
                 # pipeline_manager.logger.info(f"Rank {rank} received chunk {latent_data.chunk_idx}")
 
@@ -217,11 +232,6 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             reply.wait()
             pipeline_manager._handle_block_scheduling(block_num, total_blocks=30)
             args.schedule_block = False
-
-        if pipeline_manager.processed >= pipeline_manager.world_size:
-            pipeline_manager.pipeline.hidden_states = latent_data.original_latents
-            pipeline_manager.pipeline.kv_cache_starts.copy_(latent_data.current_start)
-            pipeline_manager.pipeline.kv_cache_ends.copy_(latent_data.current_end)
 
         last_image = images[:,:,[-1]]
         chunk_idx += 1
@@ -262,8 +272,18 @@ def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
         # Receive data from previous rank
         with torch.cuda.stream(pipeline_manager.com_stream):
             # pipeline_manager.logger.info(f"Rank {rank} receiving data")
+            if 'latent_data' in locals():
+                pipeline_manager.buffer_manager.return_buffer(latent_data.latents, "latent")
+                pipeline_manager.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+
+                if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                    pipeline_manager.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                    pipeline_manager.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                    pipeline_manager.buffer_manager.return_buffer(latent_data.current_end, "misc")
+
             latent_data = pipeline_manager.data_transfer.receive_latent_data_async(num_steps)
-            # pipeline_manager.logger.info(f"Rank {rank} received chunk {latent_data.chunk_idx}")
             if latent_data.chunk_idx == -1:
                 need_update_prompt = True
                 continue
@@ -391,6 +411,17 @@ def middle_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
 
         # Receive data from previous rank
         with torch.cuda.stream(pipeline_manager.com_stream):
+            if 'latent_data' in locals():
+                pipeline_manager.buffer_manager.return_buffer(latent_data.latents, "latent")
+                pipeline_manager.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+
+                if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                    pipeline_manager.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                    pipeline_manager.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                    pipeline_manager.buffer_manager.return_buffer(latent_data.current_end, "misc")
+
             latent_data = pipeline_manager.data_transfer.receive_latent_data_async(num_steps)
             if latent_data.chunk_idx == -1:
                 need_update_prompt = True
