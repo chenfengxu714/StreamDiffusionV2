@@ -211,6 +211,10 @@ class SingleGPUInferencePipeline:
                 
                 noise = torch.randn_like(latents)
                 noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
+
+            if current_start//self.pipeline.frame_seq_length >= 50:
+                current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
+                current_end = current_start + (chunck_size // 4) * self.pipeline.frame_seq_length
                 
             # DiT inference - using input mode to process all 30 blocks
             denoised_pred = self.pipeline.inference_stream(

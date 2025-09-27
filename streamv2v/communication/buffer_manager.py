@@ -35,6 +35,7 @@ class BufferManager:
         self.free_buffers = {}  # For latent tensors
         self.free_buffers_origin = {}  # For original latent tensors
         self.free_buffers_kv = {}  # For KV cache tensors
+        self.free_buffers_misc = {}  # For headers, shapes, index vectors (int64 etc.)
         
         # Thread safety
         self._lock = threading.Lock()
@@ -49,11 +50,13 @@ class BufferManager:
         self.logger.propagate = False
         if not self.logger.handlers:
             handler = logging.StreamHandler()
+            # handler.setLevel(logging.DEBUG)
             formatter = logging.Formatter(
                 f'[BufferManager {device}] %(asctime)s - %(name)s - %(levelname)s - %(message)s'
             )
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
+        # self.logger.setLevel(logging.DEBUG)
     
     def get_buffer(self, shape: Tuple[int, ...], dtype: torch.dtype, 
                    buffer_type: str = "latent") -> torch.Tensor:
@@ -76,6 +79,8 @@ class BufferManager:
                 buffer_pool = self.free_buffers_origin
             elif buffer_type == "kv":
                 buffer_pool = self.free_buffers_kv
+            elif buffer_type == "misc":
+                buffer_pool = self.free_buffers_misc
             else:
                 raise ValueError(f"Unknown buffer type: {buffer_type}")
             
@@ -113,6 +118,8 @@ class BufferManager:
                 buffer_pool = self.free_buffers_origin
             elif buffer_type == "kv":
                 buffer_pool = self.free_buffers_kv
+            elif buffer_type == "misc":
+                buffer_pool = self.free_buffers_misc
             else:
                 raise ValueError(f"Unknown buffer type: {buffer_type}")
             
@@ -144,6 +151,7 @@ class BufferManager:
                 self.free_buffers.clear()
                 self.free_buffers_origin.clear()
                 self.free_buffers_kv.clear()
+                self.free_buffers_misc.clear()
                 self.logger.info("Cleared all buffer pools")
             else:
                 # Clear specific buffer pool
@@ -153,6 +161,8 @@ class BufferManager:
                     self.free_buffers_origin.clear()
                 elif buffer_type == "kv":
                     self.free_buffers_kv.clear()
+                elif buffer_type == "misc":
+                    self.free_buffers_misc.clear()
                 else:
                     raise ValueError(f"Unknown buffer type: {buffer_type}")
                 self.logger.info(f"Cleared {buffer_type} buffer pool")
@@ -168,7 +178,8 @@ class BufferManager:
             total_free_buffers = sum(len(pool) for pool in self.free_buffers.values())
             total_free_buffers_origin = sum(len(pool) for pool in self.free_buffers_origin.values())
             total_free_buffers_kv = sum(len(pool) for pool in self.free_buffers_kv.values())
-            
+            total_free_buffers_misc = sum(len(pool) for pool in self.free_buffers_misc.values())
+
             return {
                 "allocation_count": self.allocation_count,
                 "reuse_count": self.reuse_count,
@@ -176,6 +187,7 @@ class BufferManager:
                 "total_free_buffers": total_free_buffers,
                 "total_free_buffers_origin": total_free_buffers_origin,
                 "total_free_buffers_kv": total_free_buffers_kv,
+                "total_free_buffers_misc": total_free_buffers_misc,
                 "reuse_rate": self.reuse_count / max(1, self.allocation_count),
                 "buffer_pool_size": self.config.buffer_pool_size,
                 "enable_buffer_reuse": self.config.enable_buffer_reuse
@@ -209,6 +221,8 @@ class BufferManager:
                         buffer_pool = self.free_buffers_origin
                     elif buffer_type == "kv":
                         buffer_pool = self.free_buffers_kv
+                    elif buffer_type == "misc":
+                        buffer_pool = self.free_buffers_misc
                     else:
                         raise ValueError(f"Unknown buffer type: {buffer_type}")
                     

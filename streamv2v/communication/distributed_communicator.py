@@ -225,33 +225,41 @@ class DistributedCommunicator:
         
         with CommunicationTimer(f"recv_latent_data_async from rank {src}", self.logger):
             # Receive latent header (length 4): [i, bsz, slen, cch]
-            latent_header = torch.empty(4, dtype=torch.int64, device=self.device)
+            latent_header = buffer_manager.get_buffer((4,), torch.int64, "misc")
             dist.recv(latent_header, src=src, tag=CommunicationTags.LATENT_HDR)
             chunk_idx, latent_shape = self._parse_header(latent_header)
+            # header no longer needed
+            buffer_manager.return_buffer(latent_header, "misc")
             # Allocate or reuse buffer for latents: shape (bsz, slen, cch)
             latents = buffer_manager.get_buffer(tuple(latent_shape), torch.bfloat16, "latent")
             dist.recv(latents, src=src, tag=CommunicationTags.LATENT_PAY)
 
             # Receive original latent header (length 6): [i, bsz, cch, tlen, hh, ww]
-            origin_header = torch.empty(6, dtype=torch.int64, device=self.device)
+            origin_header = buffer_manager.get_buffer((6,), torch.int64, "misc")
             dist.recv(origin_header, src=src, tag=CommunicationTags.LATENT_ORIGIN_HDR)
             _, origin_shape = self._parse_header(origin_header)
+            # header no longer needed
+            buffer_manager.return_buffer(origin_header, "misc")
             # Allocate or reuse buffer for original latents: shape (bsz, cch, tlen, hh, ww)
             original_latents = buffer_manager.get_buffer(tuple(origin_shape), torch.bfloat16, "origin")
             dist.recv(original_latents, src=src, tag=CommunicationTags.LATENT_ORIGIN_PAY)
 
             # Receive patched_x_shape (length 5, int64)
-            patched_x_shape = torch.empty(5, dtype=torch.int64, device=self.device)
+            patched_x_shape = buffer_manager.get_buffer((5,), torch.int64, "misc")
             dist.recv(patched_x_shape, src=src, tag=CommunicationTags.PATCHED_X_SHAPE)
 
             # Receive start_end_step (length 2*num_steps+1, int64)
-            start_end_step = torch.empty(2 * num_steps + 1, dtype=torch.int64, device=self.device)
+            start_end_step = buffer_manager.get_buffer((2 * num_steps + 1,), torch.int64, "misc")
             dist.recv(start_end_step, src=src, tag=CommunicationTags.START_END_STEP)
 
-            # Parse start/end/step
-            current_start = start_end_step[:num_steps]
-            current_end = start_end_step[num_steps:-1]
-            current_step = start_end_step[-1].item()
+            # Parse start/end/step into dedicated misc buffers, then release the combined vector
+            current_start = buffer_manager.get_buffer((num_steps,), torch.int64, "misc")
+            current_end = buffer_manager.get_buffer((num_steps,), torch.int64, "misc")
+            current_start.copy_(start_end_step[:num_steps])
+            current_end.copy_(start_end_step[num_steps:-1])
+            current_step = int(start_end_step[-1].item())
+            # Release the temporary combined buffer
+            buffer_manager.return_buffer(start_end_step, "misc")
         
         self.logger.debug(f"Received latent data from rank {src}, chunk_idx: {chunk_idx}")
         return chunk_idx, latents, original_latents, current_start, current_end, current_step, patched_x_shape

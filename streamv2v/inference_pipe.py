@@ -214,6 +214,10 @@ class InferencePipelineManager:
                 
                 noise = torch.randn_like(latents)
                 noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
+
+            if current_start//self.pipeline.frame_seq_length >= 50:
+                current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
+                current_end = current_start + (chunck_size // 4) * self.pipeline.frame_seq_length
             
             # Measure DiT time if scheduling is enabled
             if schedule_block:
@@ -240,9 +244,19 @@ class InferencePipelineManager:
             
             self.processed += 1
             
-            # Handle communication
             with torch.cuda.stream(self.com_stream):
                 if self.processed >= self.world_size:
+                    if 'latent_data' in locals():
+                        self.buffer_manager.return_buffer(latent_data.latents, "latent")
+                        self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+
+                        if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                            self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                        if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                            self.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                        if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                            self.buffer_manager.return_buffer(latent_data.current_end, "misc")
+
                     # Receive data from previous rank
                     latent_data = self.data_transfer.receive_latent_data_async(num_steps)
             
@@ -288,7 +302,7 @@ class InferencePipelineManager:
                 schedule_block = False
 
             if self.processed >= self.world_size:
-                self.pipeline.hidden_states = latent_data.original_latents
+                self.pipeline.hidden_states.copy_(latent_data.original_latents)
                 self.pipeline.kv_cache_starts.copy_(latent_data.current_start)
                 self.pipeline.kv_cache_ends.copy_(latent_data.current_end)
             
@@ -374,6 +388,17 @@ class InferencePipelineManager:
 
             # Receive data from previous rank
             with torch.cuda.stream(self.com_stream):
+                if 'latent_data' in locals():
+                    self.buffer_manager.return_buffer(latent_data.latents, "latent")
+                    self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+
+                    if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                        self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                    if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                        self.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                    if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                        self.buffer_manager.return_buffer(latent_data.current_end, "misc")
+
                 latent_data = self.data_transfer.receive_latent_data_async(num_steps)
             torch.cuda.current_stream().wait_stream(self.com_stream)
             
@@ -451,6 +476,15 @@ class InferencePipelineManager:
         while True:
             # Receive data from previous rank
             with torch.cuda.stream(self.com_stream):
+                if 'latent_data' in locals():
+                    self.buffer_manager.return_buffer(latent_data.latents, "latent")
+                    self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+                    if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                        self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                    if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                        self.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                    if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                        self.buffer_manager.return_buffer(latent_data.current_end, "misc")
                 latent_data = self.data_transfer.receive_latent_data_async(num_steps)
             torch.cuda.current_stream().wait_stream(self.com_stream)
 
