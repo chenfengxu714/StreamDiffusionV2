@@ -58,5 +58,5 @@ Note: `--step` sets how many denoising steps are used during inference. On NVIDI
 Adjust `--nproc_per_node` to your GPU count. For different resolutions or FPS, change `--height`, `--width`, and `--fps` accordingly.
 
 ## Online Inference (Web UI)
-A minimal web demo is available under `demo/`. For setup and startup (including single-GPU `start.sh` and multi-GPU `start_pipe.sh`), please refer to `demo/README.md`.
+A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo/README.md](demo/README.md).
 - Access in a browser after startup: `http://0.0.0.0:7860` or `http://localhost:7860`
