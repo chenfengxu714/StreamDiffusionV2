@@ -1,37 +1,61 @@
-# Vid2Vid demo with a camera
+# Stream V2V Demo (Web UI)
 
-This example, based on this [MPJEG server](https://github.com/radames/Real-Time-Latent-Consistency-Model/), runs video-to-video with a live webcam feed or screen capture on a web browser.
+This demo provides a simple web interface for live video-to-video inference using the backend in this repository. It supports webcam or screen capture input in the browser.
 
-Tested with VSCode with remote GPU server. The Live Server extension would help to open the local Chorme page.
+## Prerequisites
+- Python 3.10 (follow the root README for environment setup)
+- Node.js 22+
+- NVIDIA GPU recommended (single or multi-GPU)
 
-## Usage
-
-### install Node.js 18+
-
-```bash
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash
-# Restart terminal
-nvm install 18
+## Setup
+1) Complete the Python environment and model checkpoint setup as described in the root `README.md` (Installation and Download Checkpoints).
+2) Build the frontend and start the backend via the script:
 ```
+# Install
+cd demo
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+\. "$HOME/.nvm/nvm.sh"
+nvm install 22
 
-### Install
+cd frontend
+npm install
+npm run build
+cd ../
 
-You need Node.js 18+ and Python 3.10 to run this example.
-Please make sure you've installed all dependencies according to the [installation instructions](../README.md#installation).
-
-```
-pip install -r requirements.txt
+# Start
 chmod +x start.sh
 ./start.sh
 ```
+The script will:
+- Install and build the frontend (`npm install && npm run build` in `demo/frontend`)
+- Launch the backend with `torchrun` on port `7860` and host `0.0.0.0`
 
-then open `http://0.0.0.0:7860` in your browser. (*If `http://0.0.0.0:7860` does not work well, try `http://localhost:7860`)
+## Access
+- Local: `http://0.0.0.0:7860` or `http://localhost:7860`
+- Remote server: `http://<server-ip>:7860` (ensure the port is open)
 
-### Common Bugs
+## Multi-GPU
+- Option A (edit `start.sh`): `start.sh` uses `num_gpus=1` by default. To use multiple GPUs on a single node, edit the variable in `start.sh`:
+```
+num_gpus=<your_gpu_count>
+```
+- Option B (use `start_pipe.sh`): start the multi-GPU pipeline with the provided script:
+```
+cd demo
+chmod +x start_pipe.sh
+./start_pipe.sh
+```
+This uses the pipelined (multi-process) demo backend. Adjust any GPU-related variables in `start_pipe.sh` as needed.
 
-#### Camera Not Enabled Issue
-- **Error Message**: `Cannot read properties of undefined (reading 'enumerateDevices')`.
-- **Related GitHub Issue**: [No webcam detected](https://github.com/radames/Real-Time-Latent-Consistency-Model/issues/17)
+## Troubleshooting
+- Camera not available:
+  - Allow camera/microphone access for the site in your browser.
+  - Error example: `Cannot read properties of undefined (reading 'enumerateDevices')`.
+- Frontend not reachable:
+  - Ensure the build succeeded (look for `frontend build success`).
+  - Check that port 7860 is free, or adjust the port in the script and visit the new port.
+  - For remote servers, open the port in firewall/security group.
+- Model errors:
+  - Verify that all checkpoints were downloaded and placed in the expected directories.
 
-**Potential Workaround**:  
-This issue occurs when the camera is not allowed for the web browser. Add ```http://localhost:7860,http://0.0.0.0:7860``` to [chorme setting](https://github.com/radames/Real-Time-Latent-Consistency-Model/issues/17#issuecomment-1811957196).
+For advanced usage and CLI-based inference, see the root `README.md` (single-GPU and multi-GPU inference scripts).
