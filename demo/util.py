@@ -51,6 +51,7 @@ def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, pr
         time.sleep(0.05)
 
     read_size = queue.qsize()
+    # read_size = num_frames_needed
     images = []
     for _ in range(read_size):
         images.append(queue.get())
@@ -59,6 +60,7 @@ def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, pr
         images = np.stack(images[-num_frames_needed:], axis=0)
     else:
         images = select_images(images, num_frames_needed)
+    # images = np.stack(images, axis=0)
     images = torch.from_numpy(images).unsqueeze(0)
     images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=device)
     return images

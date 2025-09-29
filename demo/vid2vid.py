@@ -20,7 +20,7 @@ from streamv2v.inference import SingleGPUInferencePipeline
 from streamv2v.inference import compute_noise_scale_and_step
 
 
-default_prompt = "Anime style, a young beautiful girl speaking directly to the camera. She has big sparkling eyes, soft long hair flowing gently, and a bright, pure smile. The scene is full of light and warmth, with cherry blossoms floating in the background under a clear blue sky. Soft pastel colors, clean outlines, and a refreshing, heartwarming atmosphere, in Japanese anime aesthetic."
+default_prompt = "A beautiful parrot is looking around, realistic."
 
 page_content = """<h1 class="text-3xl font-bold">StreamDiffusionV2</h1>
 <p class="text-sm">

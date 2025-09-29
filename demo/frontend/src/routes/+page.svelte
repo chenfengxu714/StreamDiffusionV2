@@ -55,9 +55,14 @@
 
   function getSreamdata() {
     if (isImageMode) {
-      return [getPipelineValues(), $onFrameChangeStore?.blob];
+      // Add input mode information to parameters
+      const pipelineValues = getPipelineValues();
+      const paramsWithMode = { ...pipelineValues, input_mode: inputMode, upload_mode: inputMode === 'upload' };
+      return [paramsWithMode, $onFrameChangeStore?.blob];
     } else {
-      return [$deboucedPipelineValues];
+      const pipelineValues = $deboucedPipelineValues;
+      const paramsWithMode = { ...pipelineValues, input_mode: inputMode, upload_mode: inputMode === 'upload' };
+      return [paramsWithMode];
     }
   }
 
@@ -69,8 +74,11 @@
   let isStreaming = false;
 
   function handleVideoEnded() {
-    isStreaming = false;
-    lcmLiveActions.stop();
+    // Only stop for camera mode; keep streaming for upload mode
+    if (inputMode === 'camera') {
+      isStreaming = false;
+      lcmLiveActions.stop();
+    }
   }
 
   function handleInputModeChange(mode: 'camera' | 'upload') {

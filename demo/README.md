@@ -4,7 +4,7 @@ This demo provides a simple web interface for live video-to-video inference usin
 
 ## Prerequisites
 - Python 3.10 (follow the root README for environment setup)
-- Node.js 22+
+- Node.js 18
 - NVIDIA GPU recommended (single or multi-GPU)
 
 ## Setup
@@ -15,7 +15,7 @@ This demo provides a simple web interface for live video-to-video inference usin
 cd demo
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 \. "$HOME/.nvm/nvm.sh"
-nvm install 22
+nvm install 18
 
 cd frontend
 npm install

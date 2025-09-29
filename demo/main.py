@@ -16,6 +16,8 @@ import time
 import mimetypes
 import threading
 import multiprocessing as mp
+import signal
+import sys
 
 from config import config, Args
 from util import pil_to_frame, bytes_to_pil, is_firefox
@@ -36,6 +38,7 @@ class App:
         self.conn_manager = ConnectionManager()
         self.produce_predictions_stop_event = None
         self.produce_predictions_task = None
+        self.shutdown_event = asyncio.Event()
         self.init_app()
 
     def init_app(self):
@@ -93,6 +96,12 @@ class App:
                         await self.conn_manager.send_json(user_id, {"status": "wait"})
                         await asyncio.sleep(THROTTLE)
                         continue
+                    # Mark upload completion: after this, don't receive image bytes again
+                    if data and data.get("status") == "upload_done":
+                        self.conn_manager.set_video_upload_completed(user_id, True)
+                        print(f"[Main] Upload completed for user {user_id}")
+                        await self.conn_manager.send_json(user_id, {"status": "upload_done_ack"})
+                        continue
                     if not data or data.get("status") != "next_frame":
                         await asyncio.sleep(THROTTLE)
                         continue
@@ -101,15 +110,34 @@ class App:
                     params = self.pipeline.InputParams(**params)
                     info = self.pipeline.Info()
                     params = SimpleNamespace(**params.dict())
+                    
+                    # Check if upload mode is enabled
+                    is_upload_mode = params.__dict__.get('input_mode') == 'upload' or params.__dict__.get('upload_mode', False)
+                    self.conn_manager.set_upload_mode(user_id, is_upload_mode)
+                    if is_upload_mode:
+                        print(f"[Main] Upload mode detected for user {user_id}")
+                    
                     if info.input_mode == "image":
-                        image_data = await self.conn_manager.receive_bytes(user_id)
-                        if len(image_data) == 0:
-                            await self.conn_manager.send_json(
-                                user_id, {"status": "send_frame"}
-                            )
-                            await asyncio.sleep(THROTTLE)
-                            continue
-                        params.image = bytes_to_pil(image_data)
+                        upload_completed = self.conn_manager.is_video_upload_completed(user_id)
+                        # Only receive image bytes if not in upload mode, or upload not completed yet
+                        if (not is_upload_mode) or (is_upload_mode and not upload_completed):
+                            image_data = await self.conn_manager.receive_bytes(user_id)
+                            if len(image_data) == 0:
+                                await self.conn_manager.send_json(
+                                    user_id, {"status": "send_frame"}
+                                )
+                                await asyncio.sleep(0)
+                                continue
+                            # If upload mode and not completed, append frames to cache for later reuse
+                            if is_upload_mode and not upload_completed:
+                                await self.conn_manager.add_video_frame(user_id, image_data)
+                                print(f"[Main] Added frame to video queue for user {user_id}")
+                            # For camera mode, set current image directly
+                            if not is_upload_mode:
+                                params.image = bytes_to_pil(image_data)
+                        else:
+                            # Upload already completed: do not receive more bytes; image will be fed from cached frames
+                            pass
                     await self.conn_manager.update_data(user_id, params)
                     await self.conn_manager.send_json(user_id, {"status": "wait"})
                     if last_frame_time is None:
@@ -133,13 +161,43 @@ class App:
                 async def push_frames_to_pipeline():
                     last_params = SimpleNamespace()
                     while True:
-                        params = await self.conn_manager.get_latest_data(user_id)
-                        if vars(params) and params.__dict__ != last_params.__dict__:
-                            last_params = params
-                            self.pipeline.accept_new_params(params)
-                        await self.conn_manager.send_json(
-                            user_id, {"status": "send_frame"}
-                        )
+                        # Check if upload mode is enabled
+                        video_status = self.conn_manager.get_video_queue_status(user_id)
+                        is_upload_mode = video_status.get("is_upload_mode", False)
+                        
+                        if is_upload_mode:
+                            # Upload mode: get next frame from video queue
+                            video_frame = await self.conn_manager.get_next_video_frame(user_id)
+                            if video_frame:
+                                # Create params object with video frame
+                                params = SimpleNamespace()
+                                params.image = bytes_to_pil(video_frame)
+                                # Copy other parameters
+                                if vars(last_params):
+                                    for key, value in last_params.__dict__.items():
+                                        if key != 'image':
+                                            setattr(params, key, value)
+                                
+                                if params.__dict__ != last_params.__dict__:
+                                    last_params = params
+                                    self.pipeline.accept_new_params(params)
+                                    print(f"[Main] Upload mode: sent frame to pipeline for user {user_id}")
+                                # Yield control without delaying to maximize fluency
+                                await asyncio.sleep(0)
+                            else:
+                                # No frame available, wait a bit
+                                await asyncio.sleep(0)
+                        else:
+                            # Camera mode: normal processing
+                            params = await self.conn_manager.get_latest_data(user_id)
+                            if vars(params) and params.__dict__ != last_params.__dict__:
+                                last_params = params
+                                self.pipeline.accept_new_params(params)
+                            await self.conn_manager.send_json(
+                                user_id, {"status": "send_frame"}
+                            )
+                            # Yield control without delaying
+                            await asyncio.sleep(0)
 
                 async def generate():
                     MIN_FPS = 5
@@ -186,7 +244,7 @@ class App:
                             print(f"Frame fetch error: {e}")
                             break
 
-                        await asyncio.sleep(sleep_time)
+                        await asyncio.sleep(0)
 
                 def produce_predictions(user_id, loop, stop_event):
                     while not stop_event.is_set():
@@ -247,9 +305,73 @@ class App:
             "/", StaticFiles(directory="./frontend/public", html=True), name="public"
         )
 
+        # Add shutdown event handler
+        @self.app.on_event("shutdown")
+        async def shutdown_event():
+            print("[App] Shutdown event triggered, cleaning up...")
+            await self.cleanup()
+
+    async def cleanup(self):
+        """Clean up all resources on shutdown"""
+        print("[App] Starting cleanup process...")
+        
+        # Set shutdown event
+        self.shutdown_event.set()
+        
+        # Stop all background tasks
+        if self.produce_predictions_stop_event is not None:
+            self.produce_predictions_stop_event.set()
+            print("[App] Stopped prediction tasks")
+        
+        if self.produce_predictions_task is not None:
+            self.produce_predictions_task.cancel()
+            try:
+                await self.produce_predictions_task
+            except asyncio.CancelledError:
+                pass
+            print("[App] Cancelled prediction task")
+        
+        # Close all WebSocket connections and pipeline
+        print(f"[App] Closing {len(self.conn_manager.active_connections)} active connections...")
+        try:
+            await self.conn_manager.disconnect_all(self.pipeline)
+        except Exception as e:
+            print(f"[App] Error during disconnect_all: {e}")
+        
+        print("[App] Cleanup completed")
+
+
+# Global app instance for signal handler
+app_instance = None
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C gracefully"""
+    print(f"\n[Main] Received signal {signum}, shutting down gracefully...")
+    if app_instance:
+        # Trigger cleanup in a separate thread to avoid blocking
+        import threading
+        def trigger_cleanup():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(app_instance.cleanup())
+                loop.close()
+            except Exception as e:
+                print(f"[Main] Error during cleanup: {e}")
+        
+        cleanup_thread = threading.Thread(target=trigger_cleanup)
+        cleanup_thread.daemon = True
+        cleanup_thread.start()
+        cleanup_thread.join(timeout=5)  # Wait up to 5 seconds for cleanup
+    
+    sys.exit(0)
 
 if __name__ == "__main__":
     import uvicorn
+
+    # Set up signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     mp.set_start_method("spawn", force=True)
 
@@ -261,13 +383,31 @@ if __name__ == "__main__":
         from vid2vid import Pipeline
         pipeline = Pipeline(config)
 
-    app = App(config, pipeline).app
+    app_obj = App(config, pipeline)
+    app = app_obj.app
+    app_instance = app_obj  # Set global reference for signal handler
 
-    uvicorn.run(
-        app,
-        host=config.host,
-        port=config.port,
-        reload=False,
-        ssl_certfile=config.ssl_certfile,
-        ssl_keyfile=config.ssl_keyfile,
-    )
+    try:
+        uvicorn.run(
+            app,
+            host=config.host,
+            port=config.port,
+            reload=False,
+            ssl_certfile=config.ssl_certfile,
+            ssl_keyfile=config.ssl_keyfile,
+        )
+    except KeyboardInterrupt:
+        print("\n[Main] KeyboardInterrupt received, shutting down...")
+        # Trigger cleanup
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(app_obj.cleanup())
+            loop.close()
+        except Exception as e:
+            print(f"[Main] Error during cleanup: {e}")
+        sys.exit(0)
+    except Exception as e:
+        print(f"[Main] Error: {e}")
+        sys.exit(1)

@@ -129,7 +129,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             current_start = pipeline_manager.pipeline.kv_cache_length - pipeline_manager.pipeline.frame_seq_length
             current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
 
-        images = read_images_from_queue(input_queue, chunk_size, device, stop_event, prefer_latest=True)
+        images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
         if images is None:
             break
 

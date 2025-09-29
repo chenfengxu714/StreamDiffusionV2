@@ -105,7 +105,7 @@
     videoFrameCallbackId = videoEl.requestVideoFrameCallback(onFrameChange);
   }
   // Upload mode: start frame extraction and playback only if streaming
-  $: if (inputMode === 'upload' && videoIsReady && uploadedVideoUrl && !videoEnded && isStreaming) {
+  $: if (inputMode === 'upload' && videoIsReady && uploadedVideoUrl && isStreaming) {
     videoEl.play();
     videoFrameCallbackId = videoEl.requestVideoFrameCallback(onFrameChange);
   }
@@ -156,15 +156,23 @@
   }
 
   function handleVideoEnded() {
+    if (inputMode === 'upload') {
+      // For upload mode, keep looping and keep frame extraction active
+      videoEnded = false;
+      videoIsReady = true;
+      if (videoEl) {
+        // Force restart the video for seamless loop
+        videoEl.currentTime = 0;
+        videoEl.play();
+        // Restart frame extraction
+        videoFrameCallbackId = videoEl.requestVideoFrameCallback(onFrameChange);
+      }
+      return;
+    }
+    // For camera mode, handle normally
     videoEnded = true;
     videoIsReady = false;
     if (onVideoEnded) onVideoEnded();
-    // Reset video to first frame and pause
-    if (videoEl && inputMode === 'upload') {
-      videoEl.currentTime = 0;
-      videoEl.pause();
-      videoEnded = false;
-    }
   }
 </script>
 
@@ -184,7 +192,7 @@
         playsinline
         autoplay
         muted
-        { ...(inputMode === 'camera' ? { loop: true } : {}) }
+        loop
       ></video>
       <canvas bind:this={canvasEl} class="absolute left-0 top-0 aspect-square w-full object-cover h-full"
       ></canvas>
