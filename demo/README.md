@@ -1,4 +1,4 @@
-# Stream V2V Demo (Web UI)
+# StreamDiffusionV2 Demo (Web UI)
 
 This demo provides a simple web interface for live video-to-video inference using the backend in this repository. It supports webcam or screen capture input in the browser.
 
@@ -8,8 +8,9 @@ This demo provides a simple web interface for live video-to-video inference usin
 - NVIDIA GPU recommended (single or multi-GPU)
 
 ## Setup
-1) Complete the Python environment and model checkpoint setup as described in the root `README.md` (Installation and Download Checkpoints).
+1) Complete the Python environment and model checkpoint setup as described in the root [README.md](../README.md) (Installation and Download Checkpoints).
 2) Build the frontend and start the backend via the script:
+3) Decide the inference setting through [start.sh](./start.sh) and [config.py](config.py)
 ```
 # Install
 cd demo
@@ -34,18 +35,6 @@ The script will:
 - Local: `http://0.0.0.0:7860` or `http://localhost:7860`
 - Remote server: `http://<server-ip>:7860` (ensure the port is open)
 
-## Multi-GPU
-- Option A (edit `start.sh`): `start.sh` uses `num_gpus=1` by default. To use multiple GPUs on a single node, edit the variable in `start.sh`:
-```
-num_gpus=<your_gpu_count>
-```
-- Option B (use `start_pipe.sh`): start the multi-GPU pipeline with the provided script:
-```
-cd demo
-chmod +x start_pipe.sh
-./start_pipe.sh
-```
-This uses the pipelined (multi-process) demo backend. Adjust any GPU-related variables in `start_pipe.sh` as needed.
 
 ## Troubleshooting
 - Camera not available:

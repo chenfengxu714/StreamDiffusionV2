@@ -1,5 +1,3 @@
-# StreamDiffusionV2
-
 # StreamDiffusionV2: Real-Time, Scalable, and Interactive Video Diffusion for Streaming Applications
 
 **Authors:** [Tianrui Feng](https://jerryfeng2003.github.io/)<sup>1</sup>, [Zhi Li](https://scholar.google.com/citations?user=C6kPjgwAAAAJ&hl)<sup>1</sup>, [Haocheng Xi](https://haochengxi.github.io/)<sup>1</sup>, [Muyang Li](https://lmxyy.me/)<sup>2</sup>, [Xiuyu Li](https://xiuyuli.com/)<sup>1</sup>, [Shuo Yang](https://andy-yang-1.github.io/)<sup>1</sup>, [Lvmin Zhang](https://lllyasviel.github.io/lvmin_zhang/)<sup>3</sup>, [Kelly Peng](https://www.linkedin.com/in/kellyzpeng/)<sup>4</sup>, [Song Han](https://hanlab.mit.edu/songhan)<sup>2</sup>, [Kurt Keutzer](https://people.eecs.berkeley.edu/~keutzer/)<sup>1</sup>, [Akio Kodaira](https://scholar.google.com/citations?hl=ja&user=15X3cioAAAAJ)<sup>1</sup>, [Chenfeng Xu](https://www.chenfengx.com/)<sup>5,†</sup>
@@ -16,10 +14,12 @@ StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time
 
 
 ## Prerequisites
+
 - OS: Linux with NVIDIA GPU
 - CUDA-compatible GPU and drivers
 
 ## Installation
+
 ```shell
 conda create -n stream python=3.10.0
 conda activate stream
@@ -30,13 +30,16 @@ python setup.py develop
 ```
 
 ## Download Checkpoints
+
 ```shell
 huggingface-cli download --resume-download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2V-1.3B
 ```
 Then download the checkpoint of generator from [Google Drive](https://drive.google.com/drive/folders/1YpOObikpsiNBsfTVv1w4EIbegE_UglY2?usp=sharing) and put into ckpts/wan_causal_dmd_v2v. 
 
 ## Offline Inference
+
 ### Single GPU
+
 ```shell
 python streamv2v/inference.py \
 --config_path configs/wan_causal_dmd_v2v.yaml \
@@ -51,7 +54,8 @@ python streamv2v/inference.py \
 ```
 Note: `--step` sets how many denoising steps are used during inference.
 
-### Multi-GPU (single node)
+### Multi-GPU
+
 ```shell
 torchrun --nproc_per_node=2 --master_port=29501 streamv2v/inference_pipe.py \
 --config_path configs/wan_causal_dmd_v2v.yaml \
@@ -72,3 +76,16 @@ Adjust `--nproc_per_node` to your GPU count. For different resolutions or FPS, c
 ## Online Inference (Web UI)
 A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo/README.md](demo/README.md).
 - Access in a browser after startup: `http://0.0.0.0:7860` or `http://localhost:7860`
+
+## Citation
+
+If you find this repository useful in your research, please consider giving a star ⭐ and a citation.
+```BibTeX
+@article{streamdiffusionv2,
+  title={StreamDiffusionV2: An Open-Sourced Interactive Diffusion Pipeline for Streaming Applications},
+  author={Tianrui Feng and Zhi Li and Haocheng Xi and Muyang Li and Xiuyu Li and Shuo Yang and Lvmin Zhang and Kelly Peng and Song Han and Kurt Keutzer and Akio Kodaira and Chenfeng Xu},
+  journal={Project Page},
+  year={2025},
+  url={https://streamdiffusionv2.github.io/}
+}
+```
