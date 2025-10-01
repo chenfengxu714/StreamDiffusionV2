@@ -85,6 +85,7 @@ markdown2==2.5.4
 MarkupSafe==2.1.5
 matplotlib==3.10.3
 matplotlib-inline==0.1.7
+markdown2==2.5.4
 mdurl==0.1.2
 ml_dtypes==0.5.1
 moviepy==1.0.3
@@ -121,7 +122,6 @@ orjson==3.11.3
 packaging==25.0
 pandas==2.3.1
 parso==0.8.4
-patch_conv==0.0.2b0
 peft==0.17.0
 pexpect==4.9.0
 pfzy==0.3.4
