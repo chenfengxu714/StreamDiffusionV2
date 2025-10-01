@@ -34,7 +34,7 @@ class MultiGPUPipeline(Pipeline):
                 end = start + size if r < self.args.world_size - 1 else total_blocks
                 self.total_block_num.append([start, end])
                 start = end
-
+        
         self.input_queue = Queue()
         self.output_queue = Queue()
         self.prepare_events = [Event() for _ in range(self.args.world_size)]
@@ -44,20 +44,20 @@ class MultiGPUPipeline(Pipeline):
         self.prompt_dict["prompt"] = self.prompt
         self.p_input = Process(
                 target=input_process,
-                args=(0, self.total_block_num[0], self.args, self.prompt_dict, self.prepare_events[0], self.restart_event, self.stop_event, self.input_queue),
+                args=(0, self.total_block_num, self.args, self.prompt_dict, self.prepare_events[0], self.restart_event, self.stop_event, self.input_queue),
                 daemon=True
             )
         self.p_middles = [
             Process(
                 target=middle_process,
-                args=(i, self.total_block_num[i], self.args, self.prompt_dict, self.prepare_events[i], self.stop_event),
+                args=(i, self.total_block_num, self.args, self.prompt_dict, self.prepare_events[i], self.stop_event),
                 daemon=True
             )
             for i in range(1, self.args.world_size - 1)
         ]
         self.p_output = Process(
             target=output_process,
-            args=(self.args.world_size - 1, self.total_block_num[-1], self.args, self.prompt_dict, self.prepare_events[-1], self.stop_event, self.output_queue),
+            args=(self.args.world_size - 1, self.total_block_num, self.args, self.prompt_dict, self.prepare_events[-1], self.stop_event, self.output_queue),
             daemon=True
         )
         self.processes = [self.p_input] + self.p_middles + [self.p_output]
@@ -115,7 +115,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             if images is None:
                 return
             pipeline_manager.logger.info(f"Initializing rank {rank} first batch")
-            init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num)    
+            init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num[rank])    
 
             chunk_idx = 0
             noise_scale = args.noise_scale
@@ -166,7 +166,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             current_end=current_end,
             current_step=current_step,
             block_mode='input',
-            block_num=block_num,
+            block_num=block_num[rank],
         )
         # pipeline_manager.logger.info(f"[Rank {rank}] Inference done for chunk {chunk_idx}")
 
@@ -217,21 +217,15 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
                 current_step=current_step
             )
             outstanding.append(work_objects)
-            # pipeline_manager.logger.info(f"[Rank {rank}] Scheduled send chunk {chunk_idx} to next rank")
+            # Handle block scheduling
+            if args.schedule_block and pipeline_manager.processed >= pipeline_manager.schedule_step:
+                pipeline_manager._handle_block_scheduling(block_num, total_blocks=30)
+                args.schedule_block = False
 
         if args.schedule_block:
             t_total = pipeline_manager.t_dit + t_vae
             if t_total < pipeline_manager.t_total:
                 pipeline_manager.t_total = t_total
-
-        # Handle block scheduling
-        if args.schedule_block and pipeline_manager.processed >= pipeline_manager.schedule_step:
-            with torch.cuda.stream(pipeline_manager.control_stream):
-                schedule_check = torch.tensor(1, dtype=torch.int64, device=pipeline_manager.device)
-                reply = dist.broadcast(schedule_check, src=pipeline_manager.world_size - 1, async_op=True)
-            reply.wait()
-            pipeline_manager._handle_block_scheduling(block_num, total_blocks=30)
-            args.schedule_block = False
 
         last_image = images[:,:,[-1]]
         chunk_idx += 1
@@ -263,7 +257,7 @@ def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
 
         if not is_running:
             pipeline_manager.logger.info(f"Initializing rank {rank} first batch")
-            images = init_first_batch_for_output_process(args, device, pipeline_manager, prompt, block_num)
+            images = init_first_batch_for_output_process(args, device, pipeline_manager, prompt, block_num[rank])
             for image in images:
                 output_queue.put(image)
             outstanding = []
@@ -287,6 +281,10 @@ def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
             if latent_data.chunk_idx == -1:
                 need_update_prompt = True
                 continue
+            # Handle block scheduling
+            if args.schedule_block and pipeline_manager.processed >= pipeline_manager.schedule_step - rank:
+                pipeline_manager._handle_block_scheduling(block_num, total_blocks=30)
+                args.schedule_block = False
         torch.cuda.current_stream().wait_stream(pipeline_manager.com_stream)
         # pipeline_manager.logger.info(f"[Rank {rank}] Received chunk {latent_data.chunk_idx} from previous rank")
 
@@ -302,7 +300,7 @@ def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
             current_end=latent_data.current_end,
             current_step=latent_data.current_step,
             block_mode='output',
-            block_num=block_num,
+            block_num=block_num[rank],
             patched_x_shape=latent_data.patched_x_shape,
             block_x=latent_data.latents,
         )
@@ -358,14 +356,6 @@ def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
                 if t_total < pipeline_manager.t_total:
                     pipeline_manager.t_total = t_total
 
-            # Handle block scheduling
-            if args.schedule_block and pipeline_manager.processed >= pipeline_manager.schedule_step - rank:
-                with torch.cuda.stream(pipeline_manager.control_stream):
-                    schedule_check = torch.tensor(1, dtype=torch.int64, device=pipeline_manager.device)
-                    reply = dist.broadcast(schedule_check, src=pipeline_manager.world_size - 1, async_op=True)
-                reply.wait()
-                pipeline_manager._handle_block_scheduling(block_num, total_blocks=30)
-                args.schedule_block = False
 
         is_running = True
 
@@ -405,7 +395,7 @@ def middle_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
 
         if not is_running:
             pipeline_manager.logger.info(f"Initializing rank {rank} first batch")
-            init_first_batch_for_middle_process(args, device, pipeline_manager, prompt, block_num)
+            init_first_batch_for_middle_process(args, device, pipeline_manager, prompt, block_num[rank])
             outstanding = []
             pipeline_manager.logger.info(f"Starting rank {rank} inference loop")
 
@@ -426,6 +416,10 @@ def middle_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
             if latent_data.chunk_idx == -1:
                 need_update_prompt = True
                 continue
+            # Handle block scheduling
+            if args.schedule_block and pipeline_manager.processed >= pipeline_manager.schedule_step - rank:
+                pipeline_manager._handle_block_scheduling(block_num, total_blocks=30)
+                args.schedule_block = False
         torch.cuda.current_stream().wait_stream(pipeline_manager.com_stream)
         # pipeline_manager.logger.info(f"[Rank {rank}] Received chunk {latent_data.chunk_idx} from previous rank")
 
@@ -440,7 +434,7 @@ def middle_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
             current_end=latent_data.current_end,
             current_step=latent_data.current_step,
             block_mode='middle',
-            block_num=block_num,
+            block_num=block_num[rank],
             patched_x_shape=latent_data.patched_x_shape,
             block_x=latent_data.latents,
         )
@@ -480,15 +474,6 @@ def middle_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
             t_total = pipeline_manager.t_dit
             if t_total < pipeline_manager.t_total:
                 pipeline_manager.t_total = t_total
-
-        # Handle block scheduling
-        if args.schedule_block and pipeline_manager.processed >= pipeline_manager.schedule_step - rank:
-            with torch.cuda.stream(pipeline_manager.control_stream):
-                schedule_check = torch.tensor(1, dtype=torch.int64, device=pipeline_manager.device)
-                reply = dist.broadcast(schedule_check, src=pipeline_manager.world_size - 1, async_op=True)
-            reply.wait()
-            pipeline_manager._handle_block_scheduling(block_num, total_blocks=30)
-            args.schedule_block = False
 
         is_running = True
 

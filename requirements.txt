@@ -201,7 +201,7 @@ typing_extensions==4.12.2
 tzdata==2025.2
 urllib3==2.5.0
 uv==0.8.22
-uvicorn==0.24.0.post1
+uvicorn==0.37.0
 uvloop==0.21.0
 wandb==0.21.0
 watchfiles==1.1.0

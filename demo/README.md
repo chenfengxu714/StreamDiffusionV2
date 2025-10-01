@@ -9,8 +9,8 @@ This demo provides a simple web interface for live video-to-video inference usin
 
 ## Setup
 1) Complete the Python environment and model checkpoint setup as described in the root [README.md](../README.md) (Installation and Download Checkpoints).
-2) Build the frontend and start the backend via the script:
-3) Decide the inference setting through [start.sh](./start.sh) and [config.py](config.py)
+2) Build the frontend and start the backend via the script.
+3) Modify the inference setting through [start.sh](./start.sh), eg. `--step` to set the denosing steps, `--use_multi_gpu` to enable multi-gpu inference, and `--schedule_block` to obtain optimal blocks partition. You can check the [config.py](./config.py) for more details.
 ```
 # Install
 cd demo
@@ -18,6 +18,7 @@ curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 \. "$HOME/.nvm/nvm.sh"
 nvm install 18
 
+# Build
 cd frontend
 npm install
 npm run build

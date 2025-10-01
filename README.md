@@ -69,12 +69,12 @@ torchrun --nproc_per_node=2 --master_port=29501 streamv2v/inference_pipe.py \
 --step 2
 # --schedule_block  # optional: enable block scheduling
 ```
-Note: `--step` sets how many denoising steps are used during inference. On NVIDIA H100 GPUs, enabling `--schedule_block` can provide optimal throughput.
+Note: `--step` sets how many denoising steps are used during inference. Enabling `--schedule_block` can provide optimal throughput.
 
 Adjust `--nproc_per_node` to your GPU count. For different resolutions or FPS, change `--height`, `--width`, and `--fps` accordingly.
 
 ## Online Inference (Web UI)
-A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo/README.md](demo/README.md).
+A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo](demo/README.md).
 - Access in a browser after startup: `http://0.0.0.0:7860` or `http://localhost:7860`
 
 ## Citation
