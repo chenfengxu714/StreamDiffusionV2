@@ -46,5 +46,3 @@ The script will:
   - For remote servers, open the port in firewall/security group.
 - Model errors:
   - Verify that all checkpoints were downloaded and placed in the expected directories.
-
-For advanced usage and CLI-based inference, see the root `README.md` (single-GPU and multi-GPU inference scripts).

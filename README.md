@@ -1,10 +1,10 @@
 # StreamDiffusionV2: Real-Time, Scalable, and Interactive Video Diffusion for Streaming Applications
 
-**Authors:** [Tianrui Feng](https://jerryfeng2003.github.io/)<sup>1</sup>, [Zhi Li](https://scholar.google.com/citations?user=C6kPjgwAAAAJ&hl)<sup>1</sup>, [Haocheng Xi](https://haochengxi.github.io/)<sup>1</sup>, [Muyang Li](https://lmxyy.me/)<sup>2</sup>, [Xiuyu Li](https://xiuyuli.com/)<sup>1</sup>, [Shuo Yang](https://andy-yang-1.github.io/)<sup>1</sup>, [Lvmin Zhang](https://lllyasviel.github.io/lvmin_zhang/)<sup>3</sup>, [Kelly Peng](https://www.linkedin.com/in/kellyzpeng/)<sup>4</sup>, [Song Han](https://hanlab.mit.edu/songhan)<sup>2</sup>, [Kurt Keutzer](https://people.eecs.berkeley.edu/~keutzer/)<sup>1</sup>, [Akio Kodaira](https://scholar.google.com/citations?hl=ja&user=15X3cioAAAAJ)<sup>1</sup>, [Chenfeng Xu](https://www.chenfengx.com/)<sup>5,†</sup>
+[Tianrui Feng](https://jerryfeng2003.github.io/)<sup>1</sup>, [Zhi Li](https://scholar.google.com/citations?user=C6kPjgwAAAAJ&hl)<sup>1</sup>, [Haocheng Xi](https://haochengxi.github.io/)<sup>1</sup>, [Muyang Li](https://lmxyy.me/)<sup>2</sup>, [Xiuyu Li](https://xiuyuli.com/)<sup>1</sup>, [Shuo Yang](https://andy-yang-1.github.io/)<sup>1</sup>, [Lvmin Zhang](https://lllyasviel.github.io/lvmin_zhang/)<sup>3</sup>, [Kelly Peng](https://www.linkedin.com/in/kellyzpeng/)<sup>4</sup>, [Song Han](https://hanlab.mit.edu/songhan)<sup>2</sup>, [Kurt Keutzer](https://people.eecs.berkeley.edu/~keutzer/)<sup>1</sup>, [Akio Kodaira](https://scholar.google.com/citations?hl=ja&user=15X3cioAAAAJ)<sup>1</sup>, [Chenfeng Xu](https://www.chenfengx.com/)<sup>†,1,5</sup>
 
 <sup>1</sup>UC Berkeley   <sup>2</sup>MIT   <sup>3</sup>Stanford University   <sup>4</sup>First Intelligence   <sup>5</sup>UT Austin 
 
-<sup>†</sup> Project lead, corresponding to [xuchenfeng@utexas.edu](mailto:xuchenfeng@utexas.edu)
+<sup>†</sup> Project lead, corresponding to [xuchenfeng@berkeley.edu](mailto:xuchenfeng@berkeley.edu)
 
 [![Project Page](https://img.shields.io/badge/Project-Website-orange)](https://streamdiffusionv2.github.io/)
 
@@ -79,7 +79,7 @@ A minimal web demo is available under `demo/`. For setup and startup, please ref
 
 ## Citation
 
-If you find this repository useful in your research, please consider giving a star ⭐ and a citation.
+If you find this repository useful in your research, please consider giving a star ⭐ or a citation.
 ```BibTeX
 @article{streamdiffusionv2,
   title={StreamDiffusionV2: An Open-Sourced Interactive Diffusion Pipeline for Streaming Applications},

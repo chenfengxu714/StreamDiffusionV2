@@ -280,6 +280,10 @@ class InferencePipelineManager:
                     current_step=current_step
                 )
                 outstanding.append(work_objects)
+                # Handle block scheduling
+                if schedule_block and self.processed >= self.schedule_step:
+                    self._handle_block_scheduling(block_num, total_blocks)
+                    schedule_block = False
 
             # Update timing and check completion
             torch.cuda.synchronize()
@@ -292,26 +296,14 @@ class InferencePipelineManager:
                 if t_total < self.t_total:
                     self.t_total = t_total
 
-            # Handle block scheduling
-            if schedule_block and self.processed >= self.schedule_step:
-                with torch.cuda.stream(self.control_stream):
-                    schedule_check = torch.tensor(1, dtype=torch.int64, device=self.device)
-                    reply = dist.broadcast(schedule_check, src=self.world_size - 1, async_op=True)
-                reply.wait()
-                self._handle_block_scheduling(block_num, total_blocks)
-                schedule_block = False
-
             if self.processed >= self.world_size:
                 self.pipeline.hidden_states.copy_(latent_data.original_latents)
                 self.pipeline.kv_cache_starts.copy_(latent_data.current_start)
                 self.pipeline.kv_cache_ends.copy_(latent_data.current_end)
             
             start_time = end_time
-            if self.processed == num_chuncks + num_steps * self.world_size - 4//self.world_size:
-                with torch.cuda.stream(self.control_stream):
-                    schedule_check = torch.tensor(1, dtype=torch.int64, device=self.device)
-                    reply = dist.broadcast(schedule_check, src=self.world_size - 1, async_op=True)
-                reply.wait()
+
+            if self.processed + 3 >= num_chuncks + num_steps * self.world_size + self.world_size - self.rank - 1:
                 break
         
         self.logger.info("Rank 0 inference loop completed")
@@ -336,11 +328,27 @@ class InferencePipelineManager:
         torch.cuda.synchronize()
         start_time = time.time()
         
-        # Receive data from previous rank
-        with torch.cuda.stream(self.com_stream):
-            latent_data = self.data_transfer.receive_latent_data_async(num_steps)
-        torch.cuda.current_stream().wait_stream(self.com_stream)
         while save_results < num_chuncks:
+            # Receive data from previous rank
+            with torch.cuda.stream(self.com_stream):
+                if 'latent_data' in locals():
+                    self.buffer_manager.return_buffer(latent_data.latents, "latent")
+                    self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+
+                    if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                        self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                    if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                        self.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                    if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                        self.buffer_manager.return_buffer(latent_data.current_end, "misc")
+
+                latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+                # Handle block scheduling
+                if schedule_block and self.processed >= self.schedule_step - self.rank:
+                    self._handle_block_scheduling(block_num, total_blocks)
+                    schedule_block = False
+            torch.cuda.current_stream().wait_stream(self.com_stream)
+            
             # Measure DiT time if scheduling is enabled
             if schedule_block:
                 torch.cuda.synchronize()
@@ -386,22 +394,6 @@ class InferencePipelineManager:
                 )
                 outstanding.append(work_objects)
 
-            # Receive data from previous rank
-            with torch.cuda.stream(self.com_stream):
-                if 'latent_data' in locals():
-                    self.buffer_manager.return_buffer(latent_data.latents, "latent")
-                    self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
-
-                    if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
-                        self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
-                    if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
-                        self.buffer_manager.return_buffer(latent_data.current_start, "misc")
-                    if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
-                        self.buffer_manager.return_buffer(latent_data.current_end, "misc")
-
-                latent_data = self.data_transfer.receive_latent_data_async(num_steps)
-            torch.cuda.current_stream().wait_stream(self.com_stream)
-            
             # Decode and save video
             if self.processed >= num_steps * self.world_size - 1:
                 if schedule_block:
@@ -431,20 +423,7 @@ class InferencePipelineManager:
                 save_results += 1
                 start_time = end_time
                 
-                # Handle block scheduling
-                if schedule_block and self.processed >= self.schedule_step - self.rank:
-                    with torch.cuda.stream(self.control_stream):
-                        schedule_check = torch.tensor(1, dtype=torch.int64, device=self.device)
-                        reply = dist.broadcast(schedule_check, src=self.world_size - 1, async_op=True)
-                    reply.wait()
-                    self._handle_block_scheduling(block_num, total_blocks)
-                    schedule_block = False
-
-            if save_results == num_chuncks:
-                with torch.cuda.stream(self.control_stream):
-                    schedule_check = torch.tensor(1, dtype=torch.int64, device=self.device)
-                    reply = dist.broadcast(schedule_check, src=self.world_size - 1, async_op=True)
-                reply.wait()
+            if save_results >= num_chuncks:
                 break
         
         # Save final video
@@ -457,7 +436,7 @@ class InferencePipelineManager:
         
         output_path = os.path.join(output_folder, f"output_{0:03d}.mp4")
         export_to_video(video, output_path, fps=fps)
-        self.logger.info(f"Video saved to: {output_path}")
+        self.logger.info(f"Video saved to: {output_path} (Press Ctrl+C to force exit)")
     
     def run_middle_rank_loop(self, num_chuncks: int, num_steps: int, chunck_size: int,
                             block_num: torch.Tensor, schedule_block: bool, total_blocks: int):
@@ -486,6 +465,12 @@ class InferencePipelineManager:
                     if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
                         self.buffer_manager.return_buffer(latent_data.current_end, "misc")
                 latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+
+                # Handle block scheduling
+                if schedule_block and self.processed >= self.schedule_step - self.rank:
+                    self._handle_block_scheduling(block_num, total_blocks)
+                    schedule_block = False
+
             torch.cuda.current_stream().wait_stream(self.com_stream)
 
             if schedule_block:
@@ -511,7 +496,7 @@ class InferencePipelineManager:
                     self.t_dit = temp
             
             self.processed += 1
-            
+
             # Wait for outstanding operations
             while len(outstanding) >= self.config.get('max_outstanding', 1):
                 oldest = outstanding.pop(0)
@@ -540,23 +525,12 @@ class InferencePipelineManager:
                 t_total = self.t_dit
                 if t_total < self.t_total:
                     self.t_total = t_total
-
-            # Handle block scheduling
-            if schedule_block and self.processed >= self.schedule_step - self.rank:
-                with torch.cuda.stream(self.control_stream):
-                    schedule_check = torch.tensor(1, dtype=torch.int64, device=self.device)
-                    reply = dist.broadcast(schedule_check, src=self.world_size - 1, async_op=True)
-                reply.wait()
-                self._handle_block_scheduling(block_num, total_blocks)
-                schedule_block = False
             
             self.logger.info(f"Middle {self.processed}, time: {t:.4f} s, fps: {chunck_size/t:.4f}")
+
             start_time = end_time
-            if self.processed == num_chuncks + num_steps * self.world_size - 4//self.world_size:
-                with torch.cuda.stream(self.control_stream):
-                    schedule_check = torch.tensor(1, dtype=torch.int64, device=self.device)
-                    reply = dist.broadcast(schedule_check, src=self.world_size - 1, async_op=True)
-                reply.wait()
+
+            if self.processed + 3 >= num_chuncks + num_steps * self.world_size + self.world_size - self.rank - 1:
                 break
         
         self.logger.info(f"Rank {self.rank} inference loop completed")
