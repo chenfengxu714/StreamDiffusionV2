@@ -1,5 +1,9 @@
 # StreamDiffusionV2: Real-Time, Scalable, and Interactive Video Diffusion for Streaming Applications
 
+<p align="center">
+  <video src="https://streamdiffusionv2.github.io/static/videos/demo-1.mp4" controls width="640"></video>
+</p>
+
 [Tianrui Feng](https://jerryfeng2003.github.io/)<sup>1</sup>, [Zhi Li](https://scholar.google.com/citations?user=C6kPjgwAAAAJ&hl)<sup>1</sup>, [Haocheng Xi](https://haochengxi.github.io/)<sup>1</sup>, [Muyang Li](https://lmxyy.me/)<sup>2</sup>, [Xiuyu Li](https://xiuyuli.com/)<sup>1</sup>, [Shuo Yang](https://andy-yang-1.github.io/)<sup>1</sup>, [Lvmin Zhang](https://lllyasviel.github.io/lvmin_zhang/)<sup>3</sup>, [Kelly Peng](https://www.linkedin.com/in/kellyzpeng/)<sup>4</sup>, [Song Han](https://hanlab.mit.edu/songhan)<sup>2</sup>, [Kurt Keutzer](https://people.eecs.berkeley.edu/~keutzer/)<sup>1</sup>, [Akio Kodaira](https://scholar.google.com/citations?hl=ja&user=15X3cioAAAAJ)<sup>1</sup>, [Chenfeng Xu](https://www.chenfengx.com/)<sup>†,1,5</sup>
 
 <sup>1</sup>UC Berkeley   <sup>2</sup>MIT   <sup>3</sup>Stanford University   <sup>4</sup>First Intelligence   <sup>5</sup>UT Austin 
