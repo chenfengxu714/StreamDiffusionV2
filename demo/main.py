@@ -126,7 +126,7 @@ class App:
                                 await self.conn_manager.send_json(
                                     user_id, {"status": "send_frame"}
                                 )
-                                await asyncio.sleep(0)
+                                await asyncio.sleep(sleep_time)
                                 continue
                             # If upload mode and not completed, append frames to cache for later reuse
                             if is_upload_mode and not upload_completed:
@@ -160,6 +160,7 @@ class App:
             try:
                 async def push_frames_to_pipeline():
                     last_params = SimpleNamespace()
+                    sleep_time = 1 / 20  # Initial guess
                     while True:
                         # Check if upload mode is enabled
                         video_status = self.conn_manager.get_video_queue_status(user_id)
@@ -183,10 +184,10 @@ class App:
                                     self.pipeline.accept_new_params(params)
                                     print(f"[Main] Upload mode: sent frame to pipeline for user {user_id}")
                                 # Yield control without delaying to maximize fluency
-                                await asyncio.sleep(0)
+                                await asyncio.sleep(sleep_time)
                             else:
                                 # No frame available, wait a bit
-                                await asyncio.sleep(0)
+                                await asyncio.sleep(sleep_time)
                         else:
                             # Camera mode: normal processing
                             params = await self.conn_manager.get_latest_data(user_id)
@@ -197,7 +198,7 @@ class App:
                                 user_id, {"status": "send_frame"}
                             )
                             # Yield control without delaying
-                            await asyncio.sleep(0)
+                            await asyncio.sleep(sleep_time)
 
                 async def generate():
                     MIN_FPS = 5
@@ -244,7 +245,7 @@ class App:
                             print(f"Frame fetch error: {e}")
                             break
 
-                        await asyncio.sleep(0)
+                        await asyncio.sleep(sleep_time)
 
                 def produce_predictions(user_id, loop, stop_event):
                     while not stop_event.is_set():

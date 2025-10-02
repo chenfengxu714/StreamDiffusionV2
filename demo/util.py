@@ -43,15 +43,17 @@ def is_firefox(user_agent: str) -> bool:
     return "Firefox" in user_agent
 
 
-def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=True):
+def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=False):
     # print(f"Queue size: {queue.qsize()}")
     while queue.qsize() < num_frames_needed:
         if stop_event and stop_event.is_set():
             return None
         time.sleep(0.05)
 
-    read_size = queue.qsize()
-    # read_size = num_frames_needed
+    if prefer_latest:
+        read_size = queue.qsize()
+    else:
+        read_size = min(queue.qsize(), num_frames_needed * 2)
     images = []
     for _ in range(read_size):
         images.append(queue.get())
@@ -60,7 +62,6 @@ def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, pr
         images = np.stack(images[-num_frames_needed:], axis=0)
     else:
         images = select_images(images, num_frames_needed)
-    # images = np.stack(images, axis=0)
     images = torch.from_numpy(images).unsqueeze(0)
     images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=device)
     return images
