@@ -184,7 +184,7 @@ class App:
                                     self.pipeline.accept_new_params(params)
                                     print(f"[Main] Upload mode: sent frame to pipeline for user {user_id}")
                                 # Yield control without delaying to maximize fluency
-                                await asyncio.sleep(sleep_time)
+                                # await asyncio.sleep(sleep_time)
                             else:
                                 # No frame available, wait a bit
                                 await asyncio.sleep(sleep_time)
@@ -198,7 +198,7 @@ class App:
                                 user_id, {"status": "send_frame"}
                             )
                             # Yield control without delaying
-                            await asyncio.sleep(sleep_time)
+                            # await asyncio.sleep(sleep_time)
 
                 async def generate():
                     MIN_FPS = 5
