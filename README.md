@@ -82,6 +82,10 @@ Adjust `--nproc_per_node` to your GPU count. For different resolutions or FPS, c
 A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo](demo/README.md).
 - Access in a browser after startup: `http://0.0.0.0:7860` or `http://localhost:7860`
 
+## Acknowledgements
+This project is inspired by the prior work [StreamDiffusion](https://github.com/cumulo-autumn/StreamDiffusion). We build upon the Causal DiT from [CausVid](https://github.com/tianweiy/CausVid) and the rolling KV cache design from [Self-Forcing](https://github.com/guandeh17/Self-Forcing). Thanks for their wonderful works.
+
+
 ## Citation
 
 If you find this repository useful in your research, please consider giving a star ⭐ or a citation.
