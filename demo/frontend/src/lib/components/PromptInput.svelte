@@ -54,7 +54,7 @@
       Prompt updated
     </div>
   {/if}
-  <div class="flex justify-center mt-2 w-full">
+  <div class="sm:col-span-2">
     <Button 
       on:click={handleSendPrompt}
       classList={'px-4 py-2'}
