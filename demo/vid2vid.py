@@ -141,7 +141,7 @@ class Pipeline:
 
 def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event, input_queue, output_queue):
     torch.set_grad_enabled(False)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{args.gpu_ids.split(',')[0]}")
 
     pipeline_manager = SingleGPUInferencePipeline(args, device)
     pipeline_manager.load_model(args.checkpoint_folder)

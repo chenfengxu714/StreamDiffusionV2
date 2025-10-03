@@ -22,22 +22,22 @@ from streamv2v.inference_pipe import compute_noise_scale_and_step
 class MultiGPUPipeline(Pipeline):
     def prepare(self):
         total_blocks = 30
-        if self.args.world_size == 2:
+        if self.args.num_gpus == 2:
             self.total_block_num = [[0, 15], [15, total_blocks]]
         else:
-            base = total_blocks // self.args.world_size
-            rem = total_blocks % self.args.world_size
+            base = total_blocks // self.args.num_gpus
+            rem = total_blocks % self.args.num_gpus
             start = 0
             self.total_block_num = []
-            for r in range(self.args.world_size):
+            for r in range(self.args.num_gpus):
                 size = base + (1 if r < rem else 0)
-                end = start + size if r < self.args.world_size - 1 else total_blocks
+                end = start + size if r < self.args.num_gpus - 1 else total_blocks
                 self.total_block_num.append([start, end])
                 start = end
         
         self.input_queue = Queue()
         self.output_queue = Queue()
-        self.prepare_events = [Event() for _ in range(self.args.world_size)]
+        self.prepare_events = [Event() for _ in range(self.args.num_gpus)]
         self.stop_event = Event()
         self.restart_event = Event()
         self.prompt_dict = Manager().dict()
@@ -53,11 +53,11 @@ class MultiGPUPipeline(Pipeline):
                 args=(i, self.total_block_num, self.args, self.prompt_dict, self.prepare_events[i], self.stop_event),
                 daemon=True
             )
-            for i in range(1, self.args.world_size - 1)
+            for i in range(1, self.args.num_gpus - 1)
         ]
         self.p_output = Process(
             target=output_process,
-            args=(self.args.world_size - 1, self.total_block_num, self.args, self.prompt_dict, self.prepare_events[-1], self.stop_event, self.output_queue),
+            args=(self.args.num_gpus - 1, self.total_block_num, self.args, self.prompt_dict, self.prepare_events[-1], self.stop_event, self.output_queue),
             daemon=True
         )
         self.processes = [self.p_input] + self.p_middles + [self.p_output]
@@ -71,12 +71,12 @@ class MultiGPUPipeline(Pipeline):
 
 def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_event, stop_event, input_queue):
     torch.set_grad_enabled(False)
-    torch.cuda.set_device(args.gpu_ids[rank])
-    device = torch.device(f"cuda:{args.gpu_ids[rank]}")
-    init_dist_tcp(rank, args.world_size, device=device)
+    device = torch.device(f"cuda:{args.gpu_ids.split(',')[rank]}")
+    torch.cuda.set_device(device)
+    init_dist_tcp(rank, args.num_gpus, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
-    pipeline_manager = prepare_pipeline(args, device, rank, args.world_size)
+    pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
     num_steps = len(pipeline_manager.pipeline.denoising_step_list)
     first_batch_num_frames = 5
     chunk_size = 4
@@ -105,7 +105,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
                 )
                 pipeline_manager.data_transfer.send_prompt_async(prompt, device)
                 # Receive all the pending data from previous batches to ensure all send/recv are completed
-                for _ in range(min(chunk_idx, args.world_size - 1)):
+                for _ in range(min(chunk_idx, args.num_gpus - 1)):
                     pipeline_manager.data_transfer.receive_latent_data_async(num_steps)
             is_running = False
             outstanding = []
@@ -235,12 +235,12 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
 
 def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event, output_queue):
     torch.set_grad_enabled(False)
-    torch.cuda.set_device(args.gpu_ids[rank])
-    device = torch.device(f"cuda:{args.gpu_ids[rank]}")
-    init_dist_tcp(rank, args.world_size, device=device)
+    device = torch.device(f"cuda:{args.gpu_ids.split(',')[rank]}")
+    torch.cuda.set_device(device)
+    init_dist_tcp(rank, args.num_gpus, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
     
-    pipeline_manager = prepare_pipeline(args, device, rank, args.world_size)
+    pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
     num_steps = len(pipeline_manager.pipeline.denoising_step_list)
     prompt = prompt_dict["prompt"]
     is_running = False
@@ -361,12 +361,12 @@ def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
 
 def middle_process(rank, block_num, args, prompt_dict, prepare_event, stop_event):
     torch.set_grad_enabled(False)
-    torch.cuda.set_device(args.gpu_ids[rank])
-    device = torch.device(f"cuda:{args.gpu_ids[rank]}")
-    init_dist_tcp(rank, args.world_size, device=device)
+    device = torch.device(f"cuda:{args.gpu_ids.split(',')[rank]}")
+    torch.cuda.set_device(device)
+    init_dist_tcp(rank, args.num_gpus, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
     
-    pipeline_manager = prepare_pipeline(args, device, rank, args.world_size)
+    pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
     num_steps = len(pipeline_manager.pipeline.denoising_step_list)
     prompt = prompt_dict["prompt"]
     is_running = False

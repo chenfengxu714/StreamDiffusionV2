@@ -126,7 +126,7 @@ class App:
                                 await self.conn_manager.send_json(
                                     user_id, {"status": "send_frame"}
                                 )
-                                await asyncio.sleep(sleep_time)
+                                # await asyncio.sleep(sleep_time)
                                 continue
                             # If upload mode and not completed, append frames to cache for later reuse
                             if is_upload_mode and not upload_completed:
@@ -377,7 +377,7 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
 
     config.pretty_print()
-    if config.use_multi_gpu:
+    if config.num_gpus > 1:
         from vid2vid_pipe import MultiGPUPipeline
         pipeline = MultiGPUPipeline(config)
     else:
