@@ -35,17 +35,10 @@ The script will:
 - Remote server: `http://<server-ip>:7860` (ensure the port is open)
 
 ## Multi-GPU
-- Option A (edit `start.sh`): `start.sh` uses `num_gpus=1` by default. To use multiple GPUs on a single node, edit the variable in `start.sh`:
+- Edit `start.sh`: `start.sh` uses `num_gpus=1` by default. To use multiple GPUs on a single node, edit the variable in `start.sh`, for example: 
 ```
-num_gpus=<your_gpu_count>
+python main.py --port 7860 --host 0.0.0.0 --num_gpus 2 --gpu_ids 0,1
 ```
-- Option B (use `start_pipe.sh`): start the multi-GPU pipeline with the provided script:
-```
-cd demo
-chmod +x start_pipe.sh
-./start_pipe.sh
-```
-This uses the pipelined (multi-process) demo backend. Adjust any GPU-related variables in `start_pipe.sh` as needed.
 
 ## Troubleshooting
 - Camera not available:
