@@ -20,7 +20,7 @@ from streamv2v.inference import SingleGPUInferencePipeline
 from streamv2v.inference import compute_noise_scale_and_step
 
 
-default_prompt = "A beautiful parrot is looking around, realistic."
+default_prompt = "Cyberpunk-inspired figure, neon-lit hair highlights, augmented cybernetic facial features, glowing interface holograms floating around, futuristic cityscape reflected in eyes, vibrant neon color palette, cinematic sci-fi style"
 
 page_content = """<h1 class="text-3xl font-bold">StreamDiffusionV2</h1>
 <p class="text-sm">
