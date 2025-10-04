@@ -1,9 +1,10 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 
 
 export enum LCMLiveStatus {
     CONNECTED = "connected",
     DISCONNECTED = "disconnected",
+    PAUSED = "paused",
     WAIT = "wait",
     SEND_FRAME = "send_frame",
     TIMEOUT = "timeout",
@@ -15,18 +16,23 @@ export const lcmLiveStatus = writable<LCMLiveStatus>(initStatus);
 export const streamId = writable<string | null>(null);
 
 let websocket: WebSocket | null = null;
-let shouldSendRestartFlag: boolean = false;
+let userId: string | null = null;
 export const lcmLiveActions = {
     async start(getSreamdata: () => any[]) {
         return new Promise((resolve, reject) => {
 
             try {
-                // If an existing websocket exists but is not open, drop it
-                if (websocket && websocket.readyState !== WebSocket.OPEN) {
+                // If an existing websocket exists and is open, reuse it
+                if (websocket && websocket.readyState === WebSocket.OPEN) {
+                    lcmLiveStatus.set(LCMLiveStatus.CONNECTED);
+                    websocket.send(JSON.stringify({ status: "resume", timestamp: Date.now() }));
+                    streamId.set(userId);
+                    resolve({ status: "connected"});
+                } else {
                     websocket = null;
                 }
 
-                const userId = crypto.randomUUID();
+                userId = crypto.randomUUID();
                 const websocketURL = `${window.location.protocol === "https:" ? "wss" : "ws"
                     }:${window.location.host}/api/ws/${userId}`;
 
@@ -47,11 +53,12 @@ export const lcmLiveActions = {
                         case "connected":
                             lcmLiveStatus.set(LCMLiveStatus.CONNECTED);
                             streamId.set(userId);
-                            // Ensure first params carry restart flag
-                            shouldSendRestartFlag = true;
                             resolve({ status: "connected", userId });
                             break;
                         case "send_frame":
+                            if (get(lcmLiveStatus) === LCMLiveStatus.PAUSED) {
+                                break;
+                            }
                             lcmLiveStatus.set(LCMLiveStatus.SEND_FRAME);
                             const streamData = getSreamdata();
                             websocket?.send(JSON.stringify({ 
@@ -59,16 +66,13 @@ export const lcmLiveActions = {
                                 timestamp: Date.now()
                             }));
                             for (const d of streamData) {
-                                if (typeof d === 'object' && d !== null && !(d instanceof Blob)) {
-                                    const payload = shouldSendRestartFlag ? { ...d, restart: true } : d;
-                                    this.send(payload);
-                                    shouldSendRestartFlag = false;
-                                } else {
-                                    this.send(d);
-                                }
+                                this.send(d);
                             }
                             break;
                         case "wait":
+                            if (get(lcmLiveStatus) === LCMLiveStatus.PAUSED) {
+                                break;
+                            }
                             lcmLiveStatus.set(LCMLiveStatus.WAIT);
                             break;
                         case "timeout":
@@ -106,10 +110,18 @@ export const lcmLiveActions = {
         }
     },
     async stop() {
-        // Keep socket open; signal server to idle
-        if (websocket && websocket.readyState === WebSocket.OPEN) {
-            websocket.send(JSON.stringify({ status: "stop", timestamp: Date.now() }));
+        lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED);
+        if (websocket) {
+            websocket.close();
         }
-        lcmLiveStatus.set(LCMLiveStatus.WAIT);
+        websocket = null;
+        streamId.set(null);
+    },
+    async pause() {
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ status: "pause", timestamp: Date.now() }));
+        }
+        lcmLiveStatus.set(LCMLiveStatus.PAUSED);
+        streamId.set(null);
     },
 };

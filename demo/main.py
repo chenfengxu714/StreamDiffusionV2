@@ -92,9 +92,12 @@ class App:
                     # Refresh idle timer on any client control message
                     last_time = time.time()
                     # Handle stop/pause without closing socket: go idle and wait
-                    if data and data.get("status") == "stop":
-                        await self.conn_manager.send_json(user_id, {"status": "wait"})
-                        await asyncio.sleep(THROTTLE)
+                    if data and data.get("status") == "pause":
+                        params = SimpleNamespace(**{"restart": True})
+                        await self.conn_manager.update_data(user_id, params)
+                        continue
+                    if data and data.get("status") == "resume":
+                        await self.conn_manager.send_json(user_id, {"status": "send_frame"})
                         continue
                     # Mark upload completion: after this, don't receive image bytes again
                     if data and data.get("status") == "upload_done":

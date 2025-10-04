@@ -104,14 +104,15 @@ class Pipeline:
         self.prepare_event.wait()
 
     def accept_new_params(self, params: "Pipeline.InputParams"):
-        image_array = image_to_array(params.image, self.args.width, self.args.height)
-        self.input_queue.put(image_array)
+        if hasattr(params, "image"):
+            image_array = image_to_array(params.image, self.args.width, self.args.height)
+            self.input_queue.put(image_array)
 
-        if params.prompt and self.prompt != params.prompt:
+        if hasattr(params, "prompt") and params.prompt and self.prompt != params.prompt:
             self.prompt = params.prompt
             self.prompt_dict["prompt"] = self.prompt
 
-        if params.restart:
+        if hasattr(params, "restart") and params.restart:
             self.restart_event.set()
             clear_queue(self.output_queue)
 

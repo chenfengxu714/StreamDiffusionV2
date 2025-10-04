@@ -66,7 +66,7 @@
     }
   }
 
-  $: isLCMRunning = $lcmLiveStatus !== LCMLiveStatus.DISCONNECTED;
+  $: isLCMRunning = $lcmLiveStatus !== LCMLiveStatus.DISCONNECTED && $lcmLiveStatus !== LCMLiveStatus.PAUSED;
   $: if ($lcmLiveStatus === LCMLiveStatus.TIMEOUT) {
     warningMessage = 'Session timed out. Please try again.';
   }
@@ -128,10 +128,10 @@
         if (inputMode === 'camera') {
           mediaStreamActions.stop();
         }
-        lcmLiveActions.stop();
+        disabled = true;
         isStreaming = false;
-        // streamId.set(null); // <-- force output reset
-        // lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED); // <-- force status reset
+        await lcmLiveActions.pause();
+        disabled = false;
         toggleQueueChecker(true);
       }
     } catch (e) {

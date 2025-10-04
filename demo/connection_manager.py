@@ -138,6 +138,7 @@ class ConnectionManager:
                 await websocket.send_json(data)
         except Exception as e:
             logging.error(f"Error: Send json: {e}")
+            raise e
 
     async def receive_json(self, user_id: UUID) -> Dict:
         try:
@@ -146,6 +147,7 @@ class ConnectionManager:
                 return await websocket.receive_json()
         except Exception as e:
             logging.error(f"Error: Receive json: {e}")
+            raise e
 
     async def receive_bytes(self, user_id: UUID) -> bytes:
         try:
@@ -154,6 +156,7 @@ class ConnectionManager:
                 return await websocket.receive_bytes()
         except Exception as e:
             logging.error(f"Error: Receive bytes: {e}")
+            raise e
 
     async def put_frames_to_output_queue(self, user_id: UUID, frames: List[bytes]):
         session = self.active_connections.get(user_id)
