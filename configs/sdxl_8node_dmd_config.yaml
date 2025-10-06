@@ -1,0 +1,42 @@
+model_name: sdxl
+generator_grad:
+  model: true
+real_score_grad:
+  model: false
+fake_score_grad:
+  model: true
+denoising_step_list:
+- 999
+- 749
+- 499
+- 249
+num_train_timestep: 1000
+real_guidance_scale: 8.0
+generator_task: image
+denoising_loss_type: noise
+mixed_precision: true
+seed: 0
+wandb_host: WANDB_HOST
+wandb_key: WANDB_KEY
+wandb_entity: tyin
+wandb_project: causvid
+wandb_name: causvid_sdxl_test_run_1node
+sharding_strategy: full
+lr: 5.0e-07
+beta1: 0.9
+beta2: 0.999
+data_path: captions_laion6.25.txt
+batch_size: 2
+log_iters: 1000
+negative_prompt: ''
+dfake_gen_update_ratio: 5
+image_or_video_shape:
+- 2
+- 1
+- 4
+- 128
+- 128
+output_path: /mnt/localssd/sdxl_logs
+distillation_loss: dmd
+gradient_checkpointing: false
+warp_denoising_step: false
