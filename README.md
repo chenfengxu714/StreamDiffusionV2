@@ -11,8 +11,9 @@
 [![Project Page](https://img.shields.io/badge/Project-Website-orange)](https://streamdiffusionv2.github.io/)
 
 <p align="center">
-  <image src="./assets/demo-1.gif" controls width="600">
-  <image src="./assets/demo-2.gif" controls width="600">
+  <image src="./assets/demo-1.gif" controls width="800">
+  <image src="./assets/demo-2.gif" controls width="800">
+  <image src="./assets/demo-3.gif" controls width="800">
 </p>
 
 ## Overview
