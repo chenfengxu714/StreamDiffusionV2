@@ -18,8 +18,10 @@
 
 ## Overview
 
-StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time streaming applications. It scales across diverse GPU setups, supports flexible denoising steps, and delivers high FPS for creators and platforms.
+StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time streaming applications. It scales across diverse GPU setups, supports flexible denoising steps, and delivers high FPS for creators and platforms. Further details are available on our project [homepage](https://streamdiffusionv2.github.io/).
 
+## News
+- **[2025-10-06]** 🔥 Our [StreamDiffusionV2](StreamDiffusionV2) is publicly released! Check our project [homepage](https://streamdiffusionv2.github.io/) for more details.
 
 ## Prerequisites
 
@@ -94,7 +96,9 @@ A minimal web demo is available under `demo/`. For setup and startup, please ref
 - [ ] TensorRT support.
 
 ## Acknowledgements
-This project is inspired by the prior work [StreamDiffusion](https://github.com/cumulo-autumn/StreamDiffusion). We build upon the Causal DiT from [CausVid](https://github.com/tianweiy/CausVid) and the rolling KV cache design from [Self-Forcing](https://github.com/guandeh17/Self-Forcing). Thanks for their wonderful works.
+StreamDiffusionV2 is inspired by the prior works [StreamDiffusion](https://github.com/cumulo-autumn/StreamDiffusion) and [StreamV2V](https://github.com/Jeff-LiangF/streamv2v). Our Causal DiT builds upon [CausVid](https://github.com/tianweiy/CausVid), and the rolling KV cache design is inspired by [Self-Forcing](https://github.com/guandeh17/Self-Forcing).
+
+We are grateful to the team members of [StreamDiffusion](https://github.com/cumulo-autumn/StreamDiffusion) for their support. We also thank [First Intelligence](https://first-intelligence.com) and [Daydream](https://docs.daydream.live/) team for their great feedback.
 
 
 ## Citation
