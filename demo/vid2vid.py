@@ -207,6 +207,10 @@ def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event
             processed = 0
             is_running = True
 
+        if current_start//pipeline_manager.pipeline.frame_seq_length >= 50:
+            current_start = pipeline_manager.pipeline.kv_cache_length - pipeline_manager.pipeline.frame_seq_length
+            current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+
         images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
 
         noise_scale, current_step = compute_noise_scale_and_step(
