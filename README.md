@@ -107,7 +107,7 @@ If you find this repository useful in your research, please consider giving a st
 ```BibTeX
 @article{streamdiffusionv2,
   title={StreamDiffusionV2: An Open-Sourced Interactive Diffusion Pipeline for Streaming Applications},
-  author={Tianrui Feng and Zhi Li and Haocheng Xi and Muyang Li and Xiuyu Li and Shuo Yang and Lvmin Zhang and Kelly Peng and Song Han and Kurt Keutzer and Akio Kodaira and Chenfeng Xu},
+  author={Tianrui Feng and Zhi Li and Haocheng Xi and Muyang Li and Shuo Yang and Xiuyu Li and Lvmin Zhang and Kelly Peng and Song Han and Maneesh Agrawala and Kurt Keutzer and Akio Kodaira and Chenfeng Xu},
   journal={Project Page},
   year={2025},
   url={https://streamdiffusionv2.github.io/}
