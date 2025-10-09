@@ -34,11 +34,14 @@ The script will:
 - Local: `http://0.0.0.0:7860` or `http://localhost:7860`
 - Remote server: `http://<server-ip>:7860` (ensure the port is open)
 
-## Multi-GPU
-- Edit `start.sh`: `start.sh` uses `num_gpus=1` by default. To use multiple GPUs on a single node, edit the variable in `start.sh`, for example: 
+## Multi-GPU and Denoising Timesteps
+- Edit `start.sh`: By default, `start.sh` uses `num_gpus=1`. To enable multi-GPU inference on a single node or adjust the denoising steps, edit the corresponding variables in `start.sh`.  For example:
 ```
-python main.py --port 7860 --host 0.0.0.0 --num_gpus 2 --gpu_ids 0,1
+python main.py --port 7860 --host 0.0.0.0 --num_gpus 2 --gpu_ids 0,1 --step 2
 ```
+Our model supports denoising steps from 1 to 4 — feel free to set this value as needed.  
+For real-time live-streaming applications, we found that using **2 steps** provides a good balance between speed and quality.
+
 
 ## Troubleshooting
 - Camera not available:
