@@ -1,7 +1,7 @@
 # pip install git+https://github.com/openai/CLIP.git
 # pip install open_clip_torch
 from diffusers import StableDiffusionXLPipeline, LCMScheduler, DDIMScheduler
-from causvid.util import launch_distributed_job
+from causvid.util import launch_distributed_job, get_device
 from PIL import Image
 from tqdm import tqdm
 import numpy as np
@@ -50,7 +50,8 @@ def sample(pipeline, prompt_list, denoising_step_list, batch_size):
         images.extend(batch_images)
         all_prompts.extend(batch_prompt)
 
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     all_images = np.stack(images, axis=0)
 
@@ -74,13 +75,14 @@ def main():
     args = parser.parse_args()
 
     # Step 1: Setup the environment
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     torch.set_grad_enabled(False)
 
     # Step 2: Create the generator
     launch_distributed_job()
-    device = torch.cuda.current_device()
+    device = get_device()
 
     pipeline = StableDiffusionXLPipeline.from_pretrained(
         "stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch.float32).to(device)

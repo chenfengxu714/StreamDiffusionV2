@@ -2,7 +2,14 @@
 import math
 
 import torch
-import torch.cuda.amp as amp
+try:
+    import torch.cuda.amp as amp
+except ImportError:
+    # dummy amp
+    class amp:
+        @staticmethod
+        def autocast(enabled=True):
+            return torch.autocast("cpu", enabled=enabled)
 import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin

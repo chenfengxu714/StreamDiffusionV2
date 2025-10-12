@@ -18,7 +18,7 @@ import os
 import time
 import numpy as np
 import logging
-
+from causvid.util import get_device
 import torchvision
 import torchvision.transforms.functional as TF
 from einops import rearrange
@@ -157,7 +157,8 @@ class SingleGPUInferencePipeline:
         current_start = 0
         current_end = self.pipeline.frame_seq_length * 2
         
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         start_time = time.time()
         
         # Process first chunk (initialization)
@@ -236,7 +237,8 @@ class SingleGPUInferencePipeline:
                 save_results += 1
             
                 # Update timing
-                torch.cuda.synchronize()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 end_time = time.time()
                 t = end_time - start_time
                 fps_test = inp.shape[2]/t
@@ -275,7 +277,7 @@ def main():
     torch.set_grad_enabled(False)
     
     # Auto-detect device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     
     # Load configuration
     config = OmegaConf.load(args.config_path)

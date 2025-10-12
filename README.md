@@ -23,18 +23,27 @@ StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time
 ## News
 - **[2025-10-06]** 🔥 Our [StreamDiffusionV2](https://github.com/chenfengxu714/StreamDiffusionV2) is publicly released! Check our project [homepage](https://streamdiffusionv2.github.io/) for more details.
 
+## Apple Silicon Support
+This repository has been updated to support Apple Silicon. The following changes have been made:
+- All CUDA-specific dependencies have been removed and replaced with Apple Silicon-compatible alternatives.
+- The code has been refactored to use a dynamic device selection mechanism that prioritizes MPS, then CUDA, and finally falls back to CPU.
+- `flash-attention` has been replaced with `torch.nn.functional.scaled_dot_product_attention` for Apple Silicon compatibility. Users can implement their own `flash-attention` backend if they wish.
+
 ## Prerequisites
 
-- OS: Linux with NVIDIA GPU
-- CUDA-compatible GPU and drivers
+- OS: Linux with NVIDIA GPU or macOS with Apple Silicon
+- CUDA-compatible GPU and drivers (for NVIDIA GPUs)
 
 ## Installation
 
 ```shell
 conda create -n stream python=3.10.0
 conda activate stream
+# For NVIDIA GPUs
 # Require CUDA 12.4 or above, please check via `nvcc -V`
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# For Apple Silicon
+# pip install torch torchvision torchaudio
 pip install -r requirements.txt 
 python setup.py develop
 ```

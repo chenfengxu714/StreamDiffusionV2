@@ -20,6 +20,7 @@ class DMD(nn.Module):
         in the forward pass.
         """
         super().__init__()
+        self.device = device
 
         # Step 1: Initialize all models
 
@@ -114,7 +115,7 @@ class DMD(nn.Module):
             args.denoising_loss_type)()
 
         if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time
-            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).cuda().cuda()
+            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).to(self.device)
             self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
         if getattr(self.scheduler, "alphas_cumprod", None) is not None:

@@ -1,6 +1,6 @@
 from causvid.models.wan.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 from causvid.models.wan.flow_match import FlowMatchScheduler
-from causvid.util import launch_distributed_job
+from causvid.util import launch_distributed_job, get_device
 from causvid.data import TextDataset
 import torch.distributed as dist
 from tqdm import tqdm
@@ -45,11 +45,12 @@ def main():
     launch_distributed_job()
     global_rank = dist.get_rank()
 
-    device = torch.cuda.current_device()
+    device = get_device()
 
     torch.set_grad_enabled(False)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     model, encoder, scheduler, unconditional_dict = init_model(device=device)
 

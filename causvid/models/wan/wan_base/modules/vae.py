@@ -2,10 +2,18 @@
 import logging
 
 import torch
-import torch.cuda.amp as amp
+try:
+    import torch.cuda.amp as amp
+except ImportError:
+    # dummy amp
+    class amp:
+        @staticmethod
+        def autocast(dtype):
+            return torch.autocast("cpu", dtype=dtype)
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from causvid.util import get_device
 
 __all__ = [
     'WanVAE',
@@ -674,7 +682,9 @@ class WanVAE_(nn.Module):
     
 
 
-def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
+def _video_vae(pretrained_path=None, z_dim=None, device=None, **kwargs):
+    if device is None:
+        device = get_device()
     """
     Autoencoder3d adapted from Stable Diffusion 1.x, 2.x and XL.
     """
@@ -707,7 +717,9 @@ class WanVAE:
                  z_dim=16,
                  vae_pth='cache/vae_step_411000.pth',
                  dtype=torch.float,
-                 device="cuda"):
+                 device=None):
+        if device is None:
+            device = get_device()
         self.dtype = dtype
         self.device = device
 

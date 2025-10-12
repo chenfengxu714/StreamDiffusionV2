@@ -1,6 +1,13 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import torch
-import torch.cuda.amp as amp
+try:
+    import torch.cuda.amp as amp
+except ImportError:
+    # dummy amp
+    class amp:
+        @staticmethod
+        def autocast(dtype):
+            return torch.autocast("cpu", dtype=dtype)
 from xfuser.core.distributed import (get_sequence_parallel_rank,
                                      get_sequence_parallel_world_size,
                                      get_sp_group)

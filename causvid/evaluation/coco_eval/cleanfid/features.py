@@ -9,6 +9,7 @@ import causvid.evaluation.coco_eval.cleanfid
 from causvid.evaluation.coco_eval.cleanfid.downloads_helper import check_download_url
 from causvid.evaluation.coco_eval.cleanfid.inception_pytorch import InceptionV3
 from causvid.evaluation.coco_eval.cleanfid.inception_torchscript import InceptionV3W
+from causvid.util import get_device
 
 
 """
@@ -17,7 +18,9 @@ and outputs a feature embedding vector
 """
 
 
-def feature_extractor(name="torchscript_inception", device=torch.device("cuda"), resize_inside=False, use_dataparallel=True):
+def feature_extractor(name="torchscript_inception", device=None, resize_inside=False, use_dataparallel=True):
+    if device is None:
+        device = get_device()
     if name == "torchscript_inception":
         path = "./" if platform.system() == "Windows" else "/tmp"
         model = InceptionV3W(path, download=True, resize_inside=resize_inside).to(device)
@@ -43,7 +46,9 @@ Build a feature extractor for each of the modes
 """
 
 
-def build_feature_extractor(mode, device=torch.device("cuda"), use_dataparallel=True):
+def build_feature_extractor(mode, device=None, use_dataparallel=True):
+    if device is None:
+        device = get_device()
     if mode == "legacy_pytorch":
         feat_model = feature_extractor(name="pytorch_inception", resize_inside=False, device=device, use_dataparallel=use_dataparallel)
     elif mode == "legacy_tensorflow":

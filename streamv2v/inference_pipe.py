@@ -17,6 +17,7 @@ import os
 import time
 import numpy as np
 import logging
+from queue import Queue
 
 import torchvision
 import torchvision.transforms.functional as TF
@@ -106,8 +107,28 @@ class InferencePipelineManager:
         self.rank = rank
         self.world_size = world_size
 
-        self.com_stream = torch.cuda.Stream()
-        self.control_stream = torch.cuda.Stream()
+        if torch.cuda.is_available():
+            self.com_stream = torch.cuda.Stream()
+            self.control_stream = torch.cuda.Stream()
+        else:
+            class DummyStream:
+                def __init__(self):
+                    self.queue = Queue()
+                def wait_stream(self, stream):
+                    # In a real scenario, you might want to use a more sophisticated
+                    # synchronization mechanism like a threading.Event or a condition variable.
+                    # For this dummy implementation, we'll just assume the work is done.
+                    pass
+                def __enter__(self):
+                    pass
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    pass
+                def put(self, item):
+                    self.queue.put(item)
+                def get(self):
+                    return self.queue.get()
+            self.com_stream = DummyStream()
+            self.control_stream = DummyStream()
         
         # Setup logging
         self.logger = setup_logging(rank)
@@ -188,7 +209,8 @@ class InferencePipelineManager:
         
         outstanding = []
         
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         start_time = time.time()
         
         while True:
@@ -198,7 +220,7 @@ class InferencePipelineManager:
             current_start = current_end
             current_end = current_end + (chunck_size // 4) * self.pipeline.frame_seq_length
 
-            if schedule_block:
+            if schedule_block and torch.cuda.is_available():
                 torch.cuda.synchronize()
                 start_vae = time.time()
                 
@@ -220,7 +242,7 @@ class InferencePipelineManager:
                 current_end = current_start + (chunck_size // 4) * self.pipeline.frame_seq_length
             
             # Measure DiT time if scheduling is enabled
-            if schedule_block:
+            if schedule_block and torch.cuda.is_available():
                 torch.cuda.synchronize()
                 start_dit = time.time()
                 t_vae = start_dit - start_vae
@@ -236,7 +258,7 @@ class InferencePipelineManager:
             )
             
             # Update DiT timing
-            if schedule_block:
+            if schedule_block and torch.cuda.is_available():
                 torch.cuda.synchronize()
                 temp = time.time() - start_dit
                 if temp < self.t_dit:
@@ -244,23 +266,25 @@ class InferencePipelineManager:
             
             self.processed += 1
             
-            with torch.cuda.stream(self.com_stream):
-                if self.processed >= self.world_size:
-                    if 'latent_data' in locals():
-                        self.buffer_manager.return_buffer(latent_data.latents, "latent")
-                        self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+            if torch.cuda.is_available():
+                with torch.cuda.stream(self.com_stream):
+                    if self.processed >= self.world_size:
+                        if 'latent_data' in locals():
+                            self.buffer_manager.return_buffer(latent_data.latents, "latent")
+                            self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
 
-                        if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
-                            self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
-                        if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
-                            self.buffer_manager.return_buffer(latent_data.current_start, "misc")
-                        if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
-                            self.buffer_manager.return_buffer(latent_data.current_end, "misc")
+                            if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                                self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                            if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                                self.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                            if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                                self.buffer_manager.return_buffer(latent_data.current_end, "misc")
 
-                    # Receive data from previous rank
-                    latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+                        # Receive data from previous rank
+                        latent_data = self.data_transfer.receive_latent_data_async(num_steps)
             
-            torch.cuda.current_stream().wait_stream(self.com_stream)
+            if torch.cuda.is_available():
+                torch.cuda.current_stream().wait_stream(self.com_stream)
             
             # Wait for outstanding operations
             while len(outstanding) >= self.config.get('max_outstanding', 1):
@@ -269,24 +293,26 @@ class InferencePipelineManager:
                     work.wait()
             
             # Send data to next rank
-            with torch.cuda.stream(self.com_stream):
-                work_objects = self.data_transfer.send_latent_data_async(
-                    chunk_idx=start_idx,
-                    latents=denoised_pred,
-                    original_latents=self.pipeline.hidden_states,
-                    patched_x_shape=patched_x_shape,
-                    current_start=self.pipeline.kv_cache_starts,
-                    current_end=self.pipeline.kv_cache_ends,
-                    current_step=current_step
-                )
-                outstanding.append(work_objects)
-                # Handle block scheduling
-                if schedule_block and self.processed >= self.schedule_step:
-                    self._handle_block_scheduling(block_num, total_blocks)
-                    schedule_block = False
+            if torch.cuda.is_available():
+                with torch.cuda.stream(self.com_stream):
+                    work_objects = self.data_transfer.send_latent_data_async(
+                        chunk_idx=start_idx,
+                        latents=denoised_pred,
+                        original_latents=self.pipeline.hidden_states,
+                        patched_x_shape=patched_x_shape,
+                        current_start=self.pipeline.kv_cache_starts,
+                        current_end=self.pipeline.kv_cache_ends,
+                        current_step=current_step
+                    )
+                    outstanding.append(work_objects)
+                    # Handle block scheduling
+                    if schedule_block and self.processed >= self.schedule_step:
+                        self._handle_block_scheduling(block_num, total_blocks)
+                        schedule_block = False
 
             # Update timing and check completion
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             end_time = time.time()
             t = end_time - start_time
             self.logger.info(f"Encode {self.processed}, time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
@@ -325,32 +351,35 @@ class InferencePipelineManager:
 
         fps_list = []
         
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         start_time = time.time()
         
         while save_results < num_chuncks:
             # Receive data from previous rank
-            with torch.cuda.stream(self.com_stream):
-                if 'latent_data' in locals():
-                    self.buffer_manager.return_buffer(latent_data.latents, "latent")
-                    self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+            if torch.cuda.is_available():
+                with torch.cuda.stream(self.com_stream):
+                    if 'latent_data' in locals():
+                        self.buffer_manager.return_buffer(latent_data.latents, "latent")
+                        self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
 
-                    if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
-                        self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
-                    if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
-                        self.buffer_manager.return_buffer(latent_data.current_start, "misc")
-                    if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
-                        self.buffer_manager.return_buffer(latent_data.current_end, "misc")
+                        if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                            self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                        if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                            self.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                        if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                            self.buffer_manager.return_buffer(latent_data.current_end, "misc")
 
-                latent_data = self.data_transfer.receive_latent_data_async(num_steps)
-                # Handle block scheduling
-                if schedule_block and self.processed >= self.schedule_step - self.rank:
-                    self._handle_block_scheduling(block_num, total_blocks)
-                    schedule_block = False
-            torch.cuda.current_stream().wait_stream(self.com_stream)
+                    latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+                    # Handle block scheduling
+                    if schedule_block and self.processed >= self.schedule_step - self.rank:
+                        self._handle_block_scheduling(block_num, total_blocks)
+                        schedule_block = False
+            if torch.cuda.is_available():
+                torch.cuda.current_stream().wait_stream(self.com_stream)
             
             # Measure DiT time if scheduling is enabled
-            if schedule_block:
+            if schedule_block and torch.cuda.is_available():
                 torch.cuda.synchronize()
                 start_dit = time.time()
             
@@ -367,7 +396,7 @@ class InferencePipelineManager:
             )
             
             # Update DiT timing
-            if schedule_block:
+            if schedule_block and torch.cuda.is_available():
                 torch.cuda.synchronize()
                 temp = time.time() - start_dit
                 if temp < self.t_dit:
@@ -382,21 +411,22 @@ class InferencePipelineManager:
                     work.wait()
             
             # Send data to next rank (if not the last rank)
-            with torch.cuda.stream(self.com_stream):
-                work_objects = self.data_transfer.send_latent_data_async(
-                    chunk_idx=latent_data.chunk_idx,
-                    latents=latent_data.latents,
-                    original_latents=denoised_pred,
-                    patched_x_shape=latent_data.patched_x_shape,
-                    current_start=latent_data.current_start,
-                    current_end=latent_data.current_end,
-                    current_step=latent_data.current_step
-                )
-                outstanding.append(work_objects)
+            if torch.cuda.is_available():
+                with torch.cuda.stream(self.com_stream):
+                    work_objects = self.data_transfer.send_latent_data_async(
+                        chunk_idx=latent_data.chunk_idx,
+                        latents=latent_data.latents,
+                        original_latents=denoised_pred,
+                        patched_x_shape=latent_data.patched_x_shape,
+                        current_start=latent_data.current_start,
+                        current_end=latent_data.current_end,
+                        current_step=latent_data.current_step
+                    )
+                    outstanding.append(work_objects)
 
             # Decode and save video
             if self.processed >= num_steps * self.world_size - 1:
-                if schedule_block:
+                if schedule_block and torch.cuda.is_available():
                     torch.cuda.synchronize()
                     start_vae = time.time()
 
@@ -406,7 +436,8 @@ class InferencePipelineManager:
                 
                 results[save_results] = video.cpu().float().numpy()
                 
-                torch.cuda.synchronize()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
                 end_time = time.time()
                 t = end_time - start_time
                 fps_test = video.shape[0]/t
@@ -449,31 +480,34 @@ class InferencePipelineManager:
         
         outstanding = []
         
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         start_time = time.time()
         
         while True:
             # Receive data from previous rank
-            with torch.cuda.stream(self.com_stream):
-                if 'latent_data' in locals():
-                    self.buffer_manager.return_buffer(latent_data.latents, "latent")
-                    self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
-                    if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
-                        self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
-                    if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
-                        self.buffer_manager.return_buffer(latent_data.current_start, "misc")
-                    if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
-                        self.buffer_manager.return_buffer(latent_data.current_end, "misc")
-                latent_data = self.data_transfer.receive_latent_data_async(num_steps)
+            if torch.cuda.is_available():
+                with torch.cuda.stream(self.com_stream):
+                    if 'latent_data' in locals():
+                        self.buffer_manager.return_buffer(latent_data.latents, "latent")
+                        self.buffer_manager.return_buffer(latent_data.original_latents, "origin")
+                        if hasattr(latent_data, 'patched_x_shape') and latent_data.patched_x_shape is not None:
+                            self.buffer_manager.return_buffer(latent_data.patched_x_shape, "misc")
+                        if hasattr(latent_data, 'current_start') and latent_data.current_start is not None:
+                            self.buffer_manager.return_buffer(latent_data.current_start, "misc")
+                        if hasattr(latent_data, 'current_end') and latent_data.current_end is not None:
+                            self.buffer_manager.return_buffer(latent_data.current_end, "misc")
+                    latent_data = self.data_transfer.receive_latent_data_async(num_steps)
 
-                # Handle block scheduling
-                if schedule_block and self.processed >= self.schedule_step - self.rank:
-                    self._handle_block_scheduling(block_num, total_blocks)
-                    schedule_block = False
+                    # Handle block scheduling
+                    if schedule_block and self.processed >= self.schedule_step - self.rank:
+                        self._handle_block_scheduling(block_num, total_blocks)
+                        schedule_block = False
 
-            torch.cuda.current_stream().wait_stream(self.com_stream)
+            if torch.cuda.is_available():
+                torch.cuda.current_stream().wait_stream(self.com_stream)
 
-            if schedule_block:
+            if schedule_block and torch.cuda.is_available():
                 torch.cuda.synchronize()
                 start_dit = time.time()
             
@@ -489,7 +523,7 @@ class InferencePipelineManager:
                 block_x=latent_data.latents,
             )
             
-            if schedule_block:
+            if schedule_block and torch.cuda.is_available():
                 torch.cuda.synchronize()
                 temp = time.time() - start_dit
                 if temp < self.t_dit:
@@ -504,20 +538,22 @@ class InferencePipelineManager:
                     work.wait()
             
             # Send data to next rank
-            with torch.cuda.stream(self.com_stream):
-                work_objects = self.data_transfer.send_latent_data_async(
-                    chunk_idx=latent_data.chunk_idx,
-                    latents=denoised_pred,
-                    original_latents=latent_data.original_latents,
-                    patched_x_shape=latent_data.patched_x_shape,
-                    current_start=latent_data.current_start,
-                    current_end=latent_data.current_end,
-                    current_step=latent_data.current_step
-                )
-                outstanding.append(work_objects)
+            if torch.cuda.is_available():
+                with torch.cuda.stream(self.com_stream):
+                    work_objects = self.data_transfer.send_latent_data_async(
+                        chunk_idx=latent_data.chunk_idx,
+                        latents=denoised_pred,
+                        original_latents=latent_data.original_latents,
+                        patched_x_shape=latent_data.patched_x_shape,
+                        current_start=latent_data.current_start,
+                        current_end=latent_data.current_end,
+                        current_step=latent_data.current_step
+                    )
+                    outstanding.append(work_objects)
             
             # Update timing
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
             end_time = time.time()
             t = end_time - start_time
 
@@ -615,8 +651,10 @@ def main():
     
     assert world_size >= 2, "world_size must be at least 2"
     
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
     
     # Load configuration
     config = OmegaConf.load(args.config_path)
@@ -725,7 +763,8 @@ def main():
     )
 
     # Clear unused GPU memory
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Save initial result for final rank
     if rank == world_size - 1:
@@ -738,10 +777,6 @@ def main():
     dist.barrier()
     pipeline_manager.logger.info(f"Prepared, Block num: {block_num[rank].tolist()}")
 
-    used_mem = torch.cuda.memory_allocated(device) / 1024 / 1024 / 1024
-    total_mem = torch.cuda.get_device_properties(device).total_memory / 1024 / 1024 / 1024
-    pipeline_manager.logger.info(f"Current GPU memory usage: {used_mem:.2f} GB / {total_mem:.2f} GB")
-    
     # Run appropriate loop based on rank
     try:
         if rank == 0:

@@ -12,6 +12,7 @@ sys.path.append(
 )
 
 import torch
+from causvid.util import get_device
 
 from pydantic import BaseModel, Field
 from PIL import Image
@@ -142,7 +143,7 @@ class Pipeline:
 
 def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event, input_queue, output_queue):
     torch.set_grad_enabled(False)
-    device = torch.device(f"cuda:{args.gpu_ids.split(',')[0]}")
+    device = get_device()
 
     pipeline_manager = SingleGPUInferencePipeline(args, device)
     pipeline_manager.load_model(args.checkpoint_folder)

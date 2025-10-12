@@ -20,6 +20,15 @@ import wandb
 import os
 
 
+def get_device():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
+
+
 def launch_distributed_job(backend: str = "nccl"):
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -33,7 +42,8 @@ def launch_distributed_job(backend: str = "nccl"):
         init_method = f"tcp://{host}:{port}"
     dist.init_process_group(rank=rank, world_size=world_size, backend=backend,
                             init_method=init_method, timeout=timedelta(minutes=30))
-    torch.cuda.set_device(local_rank)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
 
 
 def set_seed(seed: int, deterministic: bool = False):
@@ -49,7 +59,8 @@ def set_seed(seed: int, deterministic: bool = False):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     if deterministic:
         torch.use_deterministic_algorithms(True)
@@ -116,7 +127,7 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
         auto_wrap_policy=auto_wrap_policy,
         sharding_strategy=sharding_strategy,
         mixed_precision=mixed_precision_policy,
-        device_id=torch.cuda.current_device(),
+        device_id=get_device(),
         limit_all_gathers=True,
         sync_module_states=False  # Load ckpt on rank 0 and sync to other ranks
     )

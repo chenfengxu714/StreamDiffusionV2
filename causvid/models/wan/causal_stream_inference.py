@@ -54,7 +54,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         self.scheduler = self.generator.get_scheduler()
         if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time shift
-            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).cuda()
+            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).to(device)
             self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
     def _initialize_kv_cache(self, batch_size, dtype, device):
@@ -149,7 +149,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                     denoised_pred.flatten(0, 1),
                     torch.randn_like(denoised_pred.flatten(0, 1)),
                     next_timestep *
-                    torch.ones([batch_size], device="cuda",
+                    torch.ones([batch_size], device=self.device,
                                 dtype=torch.long)
                 ).unflatten(0, denoised_pred.shape[:2])
             else:
@@ -247,7 +247,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 self.hidden_states[[i]],
                 torch.randn_like(self.hidden_states[[i]]),
                 self.denoising_step_list[i + 1] *
-                torch.ones([1], device="cuda",
+                torch.ones([1], device=self.device,
                             dtype=torch.long)
             )
 
@@ -294,7 +294,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                     denoised_pred[[i]],
                     torch.randn_like(denoised_pred[[i]]),
                     self.denoising_step_list[i + 1] *
-                    torch.ones([1], device="cuda",
+                    torch.ones([1], device=self.device,
                                 dtype=torch.long)
                 )
             patched_x_shape = None

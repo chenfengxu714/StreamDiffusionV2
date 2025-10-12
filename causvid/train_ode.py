@@ -7,7 +7,8 @@ from causvid.util import (
     set_seed, init_logging_folder,
     fsdp_wrap, cycle,
     fsdp_state_dict,
-    barrier
+    barrier,
+    get_device
 )
 import torch.distributed as dist
 from omegaconf import OmegaConf
@@ -23,15 +24,16 @@ class Trainer:
         self.config = config
 
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         launch_distributed_job()
         global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
 
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
-        self.device = torch.cuda.current_device()
+        self.device = get_device()
         self.is_main_process = global_rank == 0
 
         # use a random seed for the training
@@ -175,7 +177,8 @@ class Trainer:
             self.train_one_step()
             if (not self.config.no_save) and self.step % self.config.log_iters == 0:
                 self.save()
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             barrier()
             if self.is_main_process:

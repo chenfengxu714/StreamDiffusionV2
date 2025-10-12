@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
+from causvid.util import get_device
 import shutil
 import torch
 import time
@@ -126,7 +127,9 @@ class CLIPScoreDataset(Dataset):
 
 @torch.no_grad()
 def compute_clip_score(
-        images, captions, clip_model="ViT-B/32", device="cuda", how_many=30000):
+        images, captions, clip_model="ViT-B/32", device=None, how_many=30000):
+    if device is None:
+        device = get_device()
     print("Computing CLIP score")
     import clip as openai_clip
     if clip_model == "ViT-B/32":

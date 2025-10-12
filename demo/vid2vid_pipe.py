@@ -14,6 +14,7 @@ sys.path.append(
 
 import torch
 import torch.distributed as dist
+from causvid.util import get_device
 
 from vid2vid import Pipeline
 from streamv2v.inference_pipe import compute_noise_scale_and_step
@@ -71,8 +72,7 @@ class MultiGPUPipeline(Pipeline):
 
 def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_event, stop_event, input_queue):
     torch.set_grad_enabled(False)
-    device = torch.device(f"cuda:{args.gpu_ids.split(',')[rank]}")
-    torch.cuda.set_device(device)
+    device = get_device()
     init_dist_tcp(rank, args.num_gpus, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
@@ -235,8 +235,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
 
 def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event, output_queue):
     torch.set_grad_enabled(False)
-    device = torch.device(f"cuda:{args.gpu_ids.split(',')[rank]}")
-    torch.cuda.set_device(device)
+    device = get_device()
     init_dist_tcp(rank, args.num_gpus, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
     
@@ -361,8 +360,7 @@ def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event
 
 def middle_process(rank, block_num, args, prompt_dict, prepare_event, stop_event):
     torch.set_grad_enabled(False)
-    device = torch.device(f"cuda:{args.gpu_ids.split(',')[rank]}")
-    torch.cuda.set_device(device)
+    device = get_device()
     init_dist_tcp(rank, args.num_gpus, device=device)
     block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
     

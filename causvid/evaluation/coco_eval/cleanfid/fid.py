@@ -11,6 +11,7 @@ from causvid.evaluation.coco_eval import cleanfid
 from causvid.evaluation.coco_eval.cleanfid.utils import *
 from causvid.evaluation.coco_eval.cleanfid.features import build_feature_extractor, get_reference_statistics
 from causvid.evaluation.coco_eval.cleanfid.resize import *
+from causvid.util import get_device
 
 
 """
@@ -101,10 +102,12 @@ Compute the inception features for a list of files
 
 
 def get_files_features(l_files, model=None, num_workers=12,
-                       batch_size=128, device=torch.device("cuda"),
+                       batch_size=128, device=None,
                        mode="clean", custom_fn_resize=None,
                        description="", fdir=None, verbose=True,
                        custom_image_tranform=None):
+    if device is None:
+        device = get_device()
     # wrap the images in a dataloader for parallelizing the resize operation
     dataset = ResizeDataset(l_files, fdir=fdir, mode=mode)
     if custom_image_tranform is not None:
@@ -135,10 +138,12 @@ Compute the inception features for a numpy array
 
 
 def get_array_features(l_array, model=None, num_workers=12,
-                       batch_size=128, device=torch.device("cuda"),
+                       batch_size=128, device=None,
                        mode="clean", custom_fn_resize=None,
                        description="", verbose=True,
                        custom_image_tranform=None):
+    if device is None:
+        device = get_device()
     # wrap the images in a dataloader for parallelizing the resize operation
     dataset = ResizeArrayDataset(l_array, mode=mode)
     if custom_image_tranform is not None:
@@ -169,9 +174,11 @@ Compute the inception features for a folder of image files
 
 
 def get_folder_features(fdir, model=None, num_workers=12, num=None,
-                        shuffle=False, seed=0, batch_size=128, device=torch.device("cuda"),
+                        shuffle=False, seed=0, batch_size=128, device=None,
                         mode="clean", custom_fn_resize=None, description="", verbose=True,
                         custom_image_tranform=None):
+    if device is None:
+        device = get_device()
     # get all relevant files in the dataset
     if ".zip" in fdir:
         files = list(set(zipfile.ZipFile(fdir).namelist()))
@@ -216,8 +223,10 @@ and a specific resolution
 
 def fid_folder(fdir, dataset_name, dataset_res, dataset_split,
                model=None, mode="clean", model_name="inception_v3", num_workers=12,
-               batch_size=128, device=torch.device("cuda"), verbose=True,
+               batch_size=128, device=None, verbose=True,
                custom_image_tranform=None, custom_fn_resize=None):
+    if device is None:
+        device = get_device()
     # Load reference FID statistics (download if needed)
     ref_mu, ref_sigma = get_reference_statistics(dataset_name, dataset_res,
                                                  mode=mode, model_name=model_name, seed=0, split=dataset_split)
@@ -240,9 +249,11 @@ Compute the FID stats from a generator model
 
 
 def get_model_features(G, model, mode="clean", z_dim=512,
-                       num_gen=50_000, batch_size=128, device=torch.device("cuda"),
+                       num_gen=50_000, batch_size=128, device=None,
                        desc="FID model: ", verbose=True, return_z=False,
                        custom_image_tranform=None, custom_fn_resize=None):
+    if device is None:
+        device = get_device()
     if custom_fn_resize is None:
         fn_resize = build_resizer(mode)
     else:
@@ -295,8 +306,10 @@ and a specific resolution
 def fid_model(G, dataset_name, dataset_res, dataset_split,
               model=None, model_name="inception_v3", z_dim=512, num_gen=50_000,
               mode="clean", num_workers=0, batch_size=128,
-              device=torch.device("cuda"), verbose=True,
+              device=None, verbose=True,
               custom_image_tranform=None, custom_fn_resize=None):
+    if device is None:
+        device = get_device()
     # Load reference FID statistics (download if needed)
     ref_mu, ref_sigma = get_reference_statistics(dataset_name, dataset_res,
                                                  mode=mode, model_name=model_name,
@@ -318,8 +331,10 @@ Computes the FID score between the two given folders
 
 
 def compare_folders(fdir1, fdir2, feat_model, mode, num_workers=0,
-                    batch_size=8, device=torch.device("cuda"), verbose=True,
+                    batch_size=8, device=None, verbose=True,
                     custom_image_tranform=None, custom_fn_resize=None):
+    if device is None:
+        device = get_device()
     # get all inception features for the first folder
     fbname1 = os.path.basename(fdir1)
     np_feats1 = get_folder_features(fdir1, feat_model, num_workers=num_workers,
@@ -396,7 +411,9 @@ Cache a custom dataset statistics file
 
 
 def make_custom_stats(name, fdir, num=None, mode="clean", model_name="inception_v3",
-                      num_workers=0, batch_size=64, device=torch.device("cuda"), verbose=True):
+                      num_workers=0, batch_size=64, device=None, verbose=True):
+    if device is None:
+        device = get_device()
     stats_folder = os.path.join(os.path.dirname(cleanfid.__file__), "stats")
     os.makedirs(stats_folder, exist_ok=True)
     split, res = "custom", "na"
@@ -446,9 +463,11 @@ def make_custom_stats(name, fdir, num=None, mode="clean", model_name="inception_
 
 def compute_kid(fdir1=None, fdir2=None, gen=None,
                 mode="clean", num_workers=12, batch_size=32,
-                device=torch.device("cuda"), dataset_name="FFHQ",
+                device=None, dataset_name="FFHQ",
                 dataset_res=1024, dataset_split="train", num_gen=50_000, z_dim=512,
                 verbose=True, use_dataparallel=True):
+    if device is None:
+        device = get_device()
     # build the feature extractor based on the mode
     feat_model = build_feature_extractor(
         mode, device, use_dataparallel=use_dataparallel)
@@ -528,12 +547,14 @@ custom_image_tranform:
 
 def compute_fid(fdir1=None, fdir2=None, gen=None,
                 mode="clean", model_name="inception_v3", num_workers=12,
-                batch_size=32, device=torch.device("cuda"), dataset_name="FFHQ",
+                batch_size=32, device=None, dataset_name="FFHQ",
                 dataset_res=1024, dataset_split="train", num_gen=50_000, z_dim=512,
                 custom_feat_extractor=None, verbose=True,
                 custom_image_tranform=None, custom_fn_resize=None,
                 use_dataparallel=True, pred_arr=None
                 ):
+    if device is None:
+        device = get_device()
     # build the feature extractor based on the mode and the model to be used
     if custom_feat_extractor is None and model_name == "inception_v3":
         feat_model = build_feature_extractor(

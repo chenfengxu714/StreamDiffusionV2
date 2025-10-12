@@ -4,6 +4,7 @@ import torch
 from causvid.evaluation.coco_eval.cleanfid.features import build_feature_extractor, get_reference_statistics
 from causvid.evaluation.coco_eval.cleanfid.fid import get_batch_features, fid_from_feats
 from causvid.evaluation.coco_eval.cleanfid.resize import build_resizer
+from causvid.util import get_device
 
 
 """
@@ -12,7 +13,9 @@ A helper class that allowing adding the images one batch at a time.
 
 
 class CleanFID():
-    def __init__(self, mode="clean", model_name="inception_v3", device="cuda"):
+    def __init__(self, mode="clean", model_name="inception_v3", device=None):
+        if device is None:
+            device = get_device()
         self.real_features = []
         self.gen_features = []
         self.mode = mode

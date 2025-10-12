@@ -113,10 +113,9 @@ class WanVAEWrapper(VAEInterface):
     
     def stream_decode_to_pixel(self, latent: torch.Tensor) -> torch.Tensor:
         zs = latent.permute(0, 2, 1, 3, 4)
-        zs = zs.to(torch.bfloat16).to('cuda')
-        device, dtype = latent.device, latent.dtype
-        scale = [self.mean.to(device=device, dtype=dtype),
-                 1.0 / self.std.to(device=device, dtype=dtype)]
+        zs = zs.to(torch.bfloat16).to(latent.device)
+        scale = [self.mean.to(device=latent.device, dtype=latent.dtype),
+                 1.0 / self.std.to(device=latent.device, dtype=latent.dtype)]
         output = self.model.stream_decode(zs, scale).float().clamp_(-1, 1)
         output = output.permute(0, 2, 1, 3, 4)
         return output

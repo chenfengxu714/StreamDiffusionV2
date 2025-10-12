@@ -10,7 +10,14 @@ from contextlib import contextmanager
 from functools import partial
 
 import torch
-import torch.cuda.amp as amp
+try:
+    import torch.cuda.amp as amp
+except ImportError:
+    # dummy amp
+    class amp:
+        @staticmethod
+        def autocast(dtype):
+            return torch.autocast("cpu", dtype=dtype)
 import torch.distributed as dist
 from tqdm import tqdm
 
@@ -57,7 +64,7 @@ class WanT2V:
             t5_cpu (`bool`, *optional*, defaults to False):
                 Whether to place T5 model on CPU. Only works without t5_fsdp.
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        self.device = torch.device(f"cuda:{device_id}" if torch.cuda.is_available() else "cpu")
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
@@ -259,7 +266,8 @@ class WanT2V:
         del sample_scheduler
         if offload_model:
             gc.collect()
-            torch.cuda.synchronize()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
         if dist.is_initialized():
             dist.barrier()
 

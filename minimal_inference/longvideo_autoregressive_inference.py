@@ -3,6 +3,7 @@ from diffusers.utils import export_to_video
 from causvid.data import TextDataset
 from omegaconf import OmegaConf
 from tqdm import tqdm
+from causvid.util import get_device
 import numpy as np
 import argparse
 import torch
@@ -22,8 +23,10 @@ torch.set_grad_enabled(False)
 
 config = OmegaConf.load(args.config_path)
 
-pipeline = InferencePipeline(config, device="cuda")
-pipeline.to(device="cuda", dtype=torch.bfloat16)
+device = get_device()
+
+pipeline = InferencePipeline(config, device=device)
+pipeline.to(device=device, dtype=torch.bfloat16)
 assert args.num_overlap_frames % pipeline.num_frame_per_block == 0, "num_overlap_frames must be divisible by num_frame_per_block"
 
 state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")[
@@ -60,7 +63,7 @@ for prompt_index in tqdm(range(len(dataset))):
 
     for rollout_index in range(num_rollout):
         sampled_noise = torch.randn(
-            [1, 21, 16, 60, 104], device="cuda", dtype=torch.bfloat16
+            [1, 21, 16, 60, 104], device=device, dtype=torch.bfloat16
         )
 
         video, latents = pipeline.inference(

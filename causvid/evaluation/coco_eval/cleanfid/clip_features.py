@@ -19,7 +19,9 @@ def img_preprocess_clip(img_np):
 
 
 class CLIP_fx():
-    def __init__(self, name="ViT-B/32", device="cuda"):
+    def __init__(self, name="ViT-B/32", device=None):
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model, _ = clip.load(name, device=device)
         self.model.eval()
         self.name = "clip_" + name.lower().replace("-", "_").replace("/", "_")

@@ -215,7 +215,7 @@ def _read_video_torchvision(ele: dict,) -> torch.Tensor:
 def is_decord_available() -> bool:
     import importlib.util
 
-    return importlib.util.find_spec("decord") is not None
+    return importlib.util.find_spec("eva_decord") is not None
 
 
 def _read_video_decord(ele: dict,) -> torch.Tensor:
@@ -230,7 +230,7 @@ def _read_video_decord(ele: dict,) -> torch.Tensor:
     Returns:
         torch.Tensor: the video tensor with shape (T, C, H, W).
     """
-    import decord
+    import eva_decord as decord
     video_path = ele["video"]
     st = time.time()
     vr = decord.VideoReader(video_path)
