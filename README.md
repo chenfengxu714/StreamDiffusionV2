@@ -87,6 +87,7 @@ Adjust `--nproc_per_node` to your GPU count. For different resolutions or FPS, c
 A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo](demo/README.md).
 - Access in a browser after startup: `http://0.0.0.0:7860` or `http://localhost:7860`
 
+
 ## To-do List
 
 - [x] Demo and inference pipeline.
@@ -100,6 +101,7 @@ StreamDiffusionV2 is inspired by the prior works [StreamDiffusion](https://githu
 
 We are grateful to the team members of [StreamDiffusion](https://github.com/cumulo-autumn/StreamDiffusion) for their support. We also thank [First Intelligence](https://first-intelligence.com) and [Daydream](https://docs.daydream.live/) team for their great feedback.
 
+We also especially thank DayDream team for the great collaboration and incorporating our StreamDiffusionV2 pipeline into their cool [Demo UI](https://github.com/daydreamlive/scope). 
 
 ## Citation
 
