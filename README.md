@@ -21,6 +21,7 @@
 StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time streaming applications. It scales across diverse GPU setups, supports flexible denoising steps, and delivers high FPS for creators and platforms. Further details are available on our project [homepage](https://streamdiffusionv2.github.io/).
 
 ## News
+- **[2025-10-18]** Release our model checkpoint on [huggingface](https://huggingface.co/jerryfeng/StreamDiffusionV2/)
 - **[2025-10-06]** 🔥 Our [StreamDiffusionV2](https://github.com/chenfengxu714/StreamDiffusionV2) is publicly released! Check our project [homepage](https://streamdiffusionv2.github.io/) for more details.
 
 ## Prerequisites
@@ -43,8 +44,8 @@ python setup.py develop
 
 ```shell
 huggingface-cli download --resume-download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2V-1.3B
+huggingface-cli download --resume-download jerryfeng/StreamDiffusionV2 --local-dir ./ckpts/wan_causal_dmd_v2v
 ```
-Then download the checkpoint of generator from [Google Drive](https://drive.google.com/drive/folders/1YpOObikpsiNBsfTVv1w4EIbegE_UglY2?usp=sharing) and put into ckpts/wan_causal_dmd_v2v. 
 
 ## Offline Inference
 
