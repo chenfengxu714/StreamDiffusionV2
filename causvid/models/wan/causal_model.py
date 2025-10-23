@@ -76,7 +76,7 @@ class CausalWanSelfAttention(nn.Module):
         self.qk_norm = qk_norm
         self.eps = eps
         
-        self.sink_size = 3
+        self.sink_size = 0
 
         # layers
         self.q = nn.Linear(dim, dim)

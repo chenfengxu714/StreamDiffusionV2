@@ -26,10 +26,10 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.num_transformer_blocks = 30
         scale_size = 16
         self.frame_seq_length = (args.height//scale_size) * (args.width//scale_size)
-        self.fold=False
         self.kv_cache_length = self.frame_seq_length*args.num_kv_cache
-        self.conditional_dict = None
+        self.num_sink_tokens = args.num_sink_tokens
 
+        self.conditional_dict = None
         self.kv_cache1 = None
         self.kv_cache2 = None
         self.hidden_states = None
@@ -63,8 +63,9 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         """
         kv_cache1 = []
         
-        for _ in range(self.num_transformer_blocks):
+        for i in range(self.num_transformer_blocks):
             cache_length = self.kv_cache_length
+            self.generator.model.blocks[i].self_attn.sink_size = self.num_sink_tokens
 
             kv_cache1.append({
                 "k": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
