@@ -72,6 +72,13 @@ def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: in
     return new_noise_scale, current_step
 
 
+def compute_noise_scale_and_step_fixed(input_video_original: torch.Tensor, end_idx: int, chunck_size: int, noise_scale: float):
+    """Compute adaptive noise scale and current step based on video content."""
+    new_noise_scale = 0.8
+    current_step = int(1000*new_noise_scale)-100
+    return new_noise_scale, current_step
+
+
 class SingleGPUInferencePipeline:
     """
     Single GPU Inference Pipeline Manager
@@ -137,7 +144,7 @@ class SingleGPUInferencePipeline:
     
     def run_inference(self, input_video_original: torch.Tensor, prompts: list, 
                      num_chuncks: int, chunck_size: int, noise_scale: float, 
-                     output_folder: str, fps: int, num_steps: int):
+                     output_folder: str, fps: int, num_steps: int, fixed_noise_scale: bool = False):
         """
         Run the complete single GPU inference pipeline.
         
@@ -164,7 +171,12 @@ class SingleGPUInferencePipeline:
         if end_idx <= input_video_original.shape[2]:
             inp = input_video_original[:, :, start_idx:end_idx]
             
-            noise_scale, current_step = compute_noise_scale_and_step(
+            if fixed_noise_scale:
+                noise_scale, current_step = compute_noise_scale_and_step_fixed(
+                    input_video_original, end_idx, chunck_size, noise_scale
+                )
+            else:
+                noise_scale, current_step = compute_noise_scale_and_step(
                 input_video_original, end_idx, chunck_size, noise_scale
             )
             
@@ -201,7 +213,12 @@ class SingleGPUInferencePipeline:
             if end_idx <= input_video_original.shape[2]:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
-                noise_scale, current_step = compute_noise_scale_and_step(
+                if fixed_noise_scale:
+                    noise_scale, current_step = compute_noise_scale_and_step_fixed(
+                        input_video_original, end_idx, chunck_size, noise_scale
+                    )
+                else:
+                    noise_scale, current_step = compute_noise_scale_and_step(
                     input_video_original, end_idx, chunck_size, noise_scale
                 )
                 
@@ -270,6 +287,7 @@ def main():
     parser.add_argument("--width", type=int, default=832, help="Video width")
     parser.add_argument("--fps", type=int, default=16, help="Output video fps")
     parser.add_argument("--step", type=int, default=2, help="Step")
+    parser.add_argument("--fixed_noise_scale", action="store_true", default=False, help="Fixed noise scale")
     args = parser.parse_args()
     
     torch.set_grad_enabled(False)
@@ -319,7 +337,7 @@ def main():
     try:
         pipeline_manager.run_inference(
             input_video_original, prompts, num_chuncks, chunck_size, 
-            args.noise_scale, args.output_folder, args.fps, num_steps
+            args.noise_scale, args.output_folder, args.fps, num_steps, args.fixed_noise_scale
         )
     except Exception as e:
         print(f"Error occurred during inference: {e}")
