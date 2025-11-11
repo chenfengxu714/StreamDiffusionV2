@@ -8,7 +8,7 @@
 
 <sup>*</sup> Work done when Tianrui Feng was a visiting student at UC Berkeley advised by Chenfeng Xu.
 
-[![Project Page](https://img.shields.io/badge/Project-Website-orange)](https://streamdiffusionv2.github.io/)
+[![Project](https://img.shields.io/badge/Homepage-project-orange.svg?logo=googlehome)](https://streamdiffusionv2.github.io/) [![arXiv](https://img.shields.io/badge/Arxiv-2507.02860-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2511.07399)
 
 <p align="center">
   <image src="./assets/demo-1.gif" controls width="800">
@@ -21,7 +21,8 @@
 StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time streaming applications. It scales across diverse GPU setups, supports flexible denoising steps, and delivers high FPS for creators and platforms. Further details are available on our project [homepage](https://streamdiffusionv2.github.io/).
 
 ## News
-- **[2025-10-18]** Release our model checkpoint on [huggingface](https://huggingface.co/jerryfeng/StreamDiffusionV2/)
+- **[2025-11-10]** 🚀 We have released our [paper](https://arxiv.org/abs/2511.07399) at arXiv. Check it for more details!
+- **[2025-10-18]** Release our model checkpoint on [huggingface](https://huggingface.co/jerryfeng/StreamDiffusionV2/).
 - **[2025-10-06]** 🔥 Our [StreamDiffusionV2](https://github.com/chenfengxu714/StreamDiffusionV2) is publicly released! Check our project [homepage](https://streamdiffusionv2.github.io/) for more details.
 
 ## Prerequisites
