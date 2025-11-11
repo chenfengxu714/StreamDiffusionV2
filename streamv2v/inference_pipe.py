@@ -78,7 +78,7 @@ def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: in
     """Compute adaptive noise scale and current step based on video content."""
     l2_dist=(input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
     l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-    new_noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
+    new_noise_scale = (0.9-0.1*l2_dist.item())*0.9+noise_scale*0.1
     current_step = int(1000*new_noise_scale)-100
     return new_noise_scale, current_step
 

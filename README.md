@@ -44,9 +44,15 @@ python setup.py develop
 ## Download Checkpoints
 
 ```shell
+# 1.3B Model
 huggingface-cli download --resume-download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2V-1.3B
-huggingface-cli download --resume-download jerryfeng/StreamDiffusionV2 --local-dir ./ckpts/wan_causal_dmd_v2v
+huggingface-cli download --resume-download jerryfeng/StreamDiffusionV2 --local-dir ./ckpts --include "wan_causal_dmd_v2v/*"
+
+# 14B Model
+huggingface-cli download --resume-download Wan-AI/Wan2.1-T2V-14B --local-dir wan_models/Wan2.1-T2V-14B
+huggingface-cli download --resume-download jerryfeng/StreamDiffusionV2 --local-dir ./ckpts --include "wan_causal_dmd_v2v_14b/*"
 ```
+We use the 14B model from [CausVid-Plus](https://github.com/GoatWu/CausVid-Plus) for offline inference demo.
 
 ## Offline Inference
 
@@ -110,8 +116,8 @@ We also especially thank DayDream team for the great collaboration and incorpora
 If you find this repository useful in your research, please consider giving a star ⭐ or a citation.
 ```BibTeX
 @article{streamdiffusionv2,
-  title={StreamDiffusionV2: An Open-Sourced Interactive Diffusion Pipeline for Streaming Applications},
-  author={Tianrui Feng and Zhi Li and Haocheng Xi and Muyang Li and Shuo Yang and Xiuyu Li and Lvmin Zhang and Kelly Peng and Song Han and Maneesh Agrawala and Kurt Keutzer and Akio Kodaira and Chenfeng Xu},
+  title={StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation},
+  author={Tianrui Feng and Zhi Li and Shuo Yang and Haocheng Xi and Muyang Li and Xiuyu Li and Lvmin Zhang and Keting Yang and Kelly Peng and Song Han and Maneesh Agrawala and Kurt Keutzer and Akio Kodaira and Chenfeng Xu},
   journal={Project Page},
   year={2025},
   url={https://streamdiffusionv2.github.io/}
