@@ -116,9 +116,31 @@ class SingleGPUInferencePipeline:
     
     def load_model(self, checkpoint_folder: str):
         """Load the model from checkpoint."""
-        state_dict = torch.load(os.path.join(checkpoint_folder, "model.pt"), map_location="cpu")["generator"]
-        self.pipeline.generator.load_state_dict(state_dict, strict=True)
-        self.logger.info("Model loaded successfully")
+        ckpt_path = os.path.join(checkpoint_folder, "model.pt")
+        self.logger.info(f"Loading checkpoint from {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        # Decide which key holds the generator state dict
+        if isinstance(ckpt, dict):
+            if 'generator' in ckpt:
+                state_dict = ckpt['generator']
+            elif 'generator_ema' in ckpt:
+                state_dict = ckpt['generator_ema']
+            elif 'state_dict' in ckpt:
+                state_dict = ckpt['state_dict']
+            else:
+                # Assume the checkpoint itself is a state dict
+                state_dict = ckpt
+        else:
+            state_dict = ckpt
+
+        # Load into the pipeline generator
+        try:
+            self.pipeline.generator.load_state_dict(state_dict, strict=True)
+        except RuntimeError as e:
+            # Try non-strict load as a fallback and report
+            self.logger.warning(f"Strict load_state_dict failed: {e}; retrying with strict=False")
+            self.pipeline.generator.load_state_dict(state_dict, strict=False)
     
     def prepare_pipeline(self, text_prompts: list, noise: torch.Tensor, 
                         current_start: int, current_end: int):
@@ -150,6 +172,7 @@ class SingleGPUInferencePipeline:
         save_results = 0
 
         fps_list = []
+        dit_fps_list = []
         
         # Initialize variables
         start_idx = 0
@@ -161,7 +184,7 @@ class SingleGPUInferencePipeline:
         start_time = time.time()
         
         # Process first chunk (initialization)
-        if end_idx <= input_video_original.shape[2]:
+        if input_video_original is not None:
             inp = input_video_original[:, :, start_idx:end_idx]
             
             noise_scale, current_step = compute_noise_scale_and_step(
@@ -174,21 +197,24 @@ class SingleGPUInferencePipeline:
             
             noise = torch.randn_like(latents)
             noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
+        else:
+            noisy_latents = torch.randn(1,1+self.pipeline.num_frame_per_block,16,self.pipeline.height,self.pipeline.width, device=self.device, dtype=torch.bfloat16)
+        
             
-            # Prepare pipeline
-            denoised_pred = self.prepare_pipeline(
-                text_prompts=prompts,
-                noise=noisy_latents,
-                current_start=current_start,
-                current_end=current_end
-            )
-            
-            # Save first result - only start decoding after num_steps
-            video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred)
-            video = (video * 0.5 + 0.5).clamp(0, 1)
-            video = video[0].permute(0, 2, 3, 1).contiguous()
-            results[save_results] = video.cpu().float().numpy()
-            save_results += 1
+        # Prepare pipeline
+        denoised_pred = self.prepare_pipeline(
+            text_prompts=prompts,
+            noise=noisy_latents,
+            current_start=current_start,
+            current_end=current_end
+        )
+        
+        # Save first result - only start decoding after num_steps
+        video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+        video = (video * 0.5 + 0.5).clamp(0, 1)
+        video = video[0].permute(0, 2, 3, 1).contiguous()
+        results[save_results] = video.cpu().float().numpy()
+        save_results += 1
         
         # Process remaining chunks
         while self.processed < num_chuncks + num_steps - 1:
@@ -197,8 +223,8 @@ class SingleGPUInferencePipeline:
             end_idx = end_idx + chunck_size
             current_start = current_end
             current_end = current_end + (chunck_size // 4) * self.pipeline.frame_seq_length
-            
-            if end_idx <= input_video_original.shape[2]:
+
+            if input_video_original is not None and end_idx <= input_video_original.shape[2]:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
                 noise_scale, current_step = compute_noise_scale_and_step(
@@ -211,10 +237,16 @@ class SingleGPUInferencePipeline:
                 
                 noise = torch.randn_like(latents)
                 noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
+            else:
+                noisy_latents = torch.randn(1,self.pipeline.num_frame_per_block,16,self.pipeline.height,self.pipeline.width, device=self.device, dtype=torch.bfloat16)
+                current_step = None # Use default steps
 
-            if current_start//self.pipeline.frame_seq_length >= 50:
-                current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
-                current_end = current_start + (chunck_size // 4) * self.pipeline.frame_seq_length
+            # if current_start//self.pipeline.frame_seq_length >= 50:
+            #     current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
+            #     current_end = current_start + (chunck_size // 4) * self.pipeline.frame_seq_length
+            
+            torch.cuda.synchronize()
+            dit_start_time = time.time()
                 
             # DiT inference - using input mode to process all 30 blocks
             denoised_pred = self.pipeline.inference_stream(
@@ -223,6 +255,10 @@ class SingleGPUInferencePipeline:
                 current_end=current_end,
                 current_step=current_step,
             )
+
+            if self.processed >3:
+                torch.cuda.synchronize()
+                dit_fps_list.append(chunck_size/(time.time()-dit_start_time))
             
             self.processed += 1
             
@@ -239,7 +275,7 @@ class SingleGPUInferencePipeline:
                 torch.cuda.synchronize()
                 end_time = time.time()
                 t = end_time - start_time
-                fps_test = inp.shape[2]/t
+                fps_test = chunck_size/t
                 fps_list.append(fps_test)
                 self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, FPS: {fps_test:.4f}")
                 start_time = end_time
@@ -248,6 +284,7 @@ class SingleGPUInferencePipeline:
         video_list = [results[i] for i in range(num_chuncks)]
         video = np.concatenate(video_list, axis=0)
         fps_avg = np.mean(np.array(fps_list))
+        self.logger.info(f"DiT Average FPS: {np.mean(np.array(dit_fps_list)):.4f}")
         self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
         
         output_path = os.path.join(output_folder, f"output_{0:03d}.mp4")
@@ -264,12 +301,15 @@ def main():
     parser.add_argument("--checkpoint_folder", type=str, required=True, help="Checkpoint folder path")
     parser.add_argument("--output_folder", type=str, required=True, help="Output folder path")
     parser.add_argument("--prompt_file_path", type=str, required=True, help="Prompt file path")
-    parser.add_argument("--video_path", type=str, required=True, help="Input video path")
+    parser.add_argument("--video_path", type=str, required=False, default=None, help="Input video path")
     parser.add_argument("--noise_scale", type=float, default=0.700, help="Noise scale")
     parser.add_argument("--height", type=int, default=480, help="Video height")
     parser.add_argument("--width", type=int, default=832, help="Video width")
     parser.add_argument("--fps", type=int, default=16, help="Output video fps")
     parser.add_argument("--step", type=int, default=2, help="Step")
+    parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
+    parser.add_argument("--num_frames", type=int, default=81, help="Video length (number of frames)")
+    parser.add_argument("--fixed_noise_scale", action="store_true", default=False)
     args = parser.parse_args()
     
     torch.set_grad_enabled(False)
@@ -279,12 +319,12 @@ def main():
     
     # Load configuration
     config = OmegaConf.load(args.config_path)
-    for k, v in vars(args).items():
-        config[k] = v
+    config = OmegaConf.merge(config, OmegaConf.create(vars(args)))
     # Derive denoising_step_list from step if provided
     # Always base on the canonical full list to ensure --step overrides YAML
     full_denoising_list = [700, 600, 500, 400, 0]
-    step_value = args.step
+    step_value = int(args.step)
+    # Preserve historical mappings for 1..4
     if step_value <= 1:
         config.denoising_step_list = [700, 0]
     elif step_value == 2:
@@ -295,12 +335,15 @@ def main():
         config.denoising_step_list = full_denoising_list
     
     # Load input video
-    input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
-    if input_video_original.dtype != torch.bfloat16:
-        input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device)
-    
-    print(f"Input video tensor shape: {input_video_original.shape}")
-    b, c, t, h, w = input_video_original.shape
+    if args.video_path is not None:
+        input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
+        print(f"Input video tensor shape: {input_video_original.shape}")
+        b, c, t, h, w = input_video_original.shape
+        if input_video_original.dtype != torch.bfloat16:
+            input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device)
+    else:
+        input_video_original = None
+        t = args.num_frames
     
     # Calculate number of chunks
     chunck_size = 4

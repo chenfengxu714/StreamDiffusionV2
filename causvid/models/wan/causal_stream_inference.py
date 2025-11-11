@@ -10,21 +10,31 @@ import torch.distributed as dist
 class CausalStreamInferencePipeline(torch.nn.Module):
     def __init__(self, args, device):
         super().__init__()
+        model_type = args.model_type
         self.device = device
         # Step 1: Initialize all models
         self.generator_model_name = getattr(
             args, "generator_name", args.model_name)
         self.generator = get_diffusion_wrapper(
-            model_name=self.generator_model_name)()
+            model_name=self.generator_model_name)(model_type=model_type)
         self.text_encoder = get_text_encoder_wrapper(
-            model_name=args.model_name)()
-        self.vae = get_vae_wrapper(model_name=args.model_name)()
+            model_name=args.model_name)(model_type=model_type)
+        self.vae = get_vae_wrapper(model_name=args.model_name)(model_type=model_type)
 
         # Step 2: Initialize all causal hyperparmeters
         self._init_denoising_step_list(args, device)
 
-        self.num_transformer_blocks = 30
+        if model_type == "T2V-1.3B":
+            self.num_transformer_blocks = 30
+            self.num_heads = 12
+        elif model_type == "T2V-14B":
+            self.num_transformer_blocks = 40
+            self.num_heads = 40
+        else:
+            raise ValueError(f"Model type {model_type} not supported")
         scale_size = 16
+        self.height = args.height//scale_size*2
+        self.width = args.width//scale_size*2
         self.frame_seq_length = (args.height//scale_size) * (args.width//scale_size)
         self.kv_cache_length = self.frame_seq_length*args.num_kv_cache
         self.num_sink_tokens = args.num_sink_tokens
@@ -68,8 +78,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.generator.model.blocks[i].self_attn.sink_size = self.num_sink_tokens
 
             kv_cache1.append({
-                "k": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, cache_length, 12, 128], dtype=dtype, device=device),
+                "k": torch.zeros([batch_size, cache_length, self.num_heads, 128], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, cache_length, self.num_heads, 128], dtype=dtype, device=device),
                 "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
                 "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
             })
@@ -84,8 +94,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         for _ in range(self.num_transformer_blocks):
             crossattn_cache.append({
-                "k": torch.zeros([batch_size, 512, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, 512, 12, 128], dtype=dtype, device=device),
+                "k": torch.zeros([batch_size, 512, self.num_heads, 128], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, 512, self.num_heads, 128], dtype=dtype, device=device),
                 "is_init": False,
             })
 
@@ -101,6 +111,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         current_start: int = 0,
         current_end: int = None,
         block_num: torch.Tensor = None,
+        batch_denoise: bool=True,
     ):
         self.device = device
         batch_size = noise.shape[0]
@@ -165,6 +176,9 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                     current_end=current_end
                 )
 
+        if not batch_denoise:
+            return denoised_pred
+
         # Pre-allocate hidden_states tensor to avoid memory allocation during inference
         self.batch_size = len(self.denoising_step_list)
 
@@ -206,7 +220,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         if block_mode in ['output', 'middle']:
             self.block_x = torch.zeros(
-                (self.batch_size, self.frame_seq_length, 1536), dtype=noise.dtype, device=device
+                (self.batch_size, self.frame_seq_length, self.num_heads*128), dtype=noise.dtype, device=device
             )
         else:
             self.block_x = None
@@ -231,7 +245,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.kv_cache_ends[1:] = self.kv_cache_ends[:-1].clone()
         self.kv_cache_ends[0] = current_end
 
-        self.timestep[0] = current_step
+        if current_step is not None:
+            self.timestep[0] = current_step
         
         self.hidden_states = self.generator(
             noisy_image_or_video=self.hidden_states,
@@ -253,6 +268,51 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             )
 
         return self.hidden_states
+    
+    def inference_onestep(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
+        batch_size = noise.shape[0]
+
+        current_start = torch.ones(batch_size, dtype=torch.long, device=self.device) * current_start
+        current_end = torch.ones(batch_size, dtype=torch.long, device=self.device) * current_end
+
+        # Step 2.1: Spatial denoising loop
+        self.denoising_step_list[0] = current_step
+        for index, current_timestep in enumerate(self.denoising_step_list):
+            # set current timestep
+            timestep = torch.ones(
+                [batch_size, noise.shape[1]], device=noise.device, dtype=torch.int64) * current_timestep
+
+            if index < len(self.denoising_step_list) - 1:
+                denoised_pred = self.generator(
+                    noisy_image_or_video=noise,
+                    conditional_dict=self.conditional_dict,
+                    timestep=timestep,
+                    kv_cache=self.kv_cache1,
+                    crossattn_cache=self.crossattn_cache,
+                    current_start=current_start,
+                    current_end=current_end
+                )
+                next_timestep = self.denoising_step_list[index + 1]
+                noise = self.scheduler.add_noise(
+                    denoised_pred.flatten(0, 1),
+                    torch.randn_like(denoised_pred.flatten(0, 1)),
+                    next_timestep *
+                    torch.ones([batch_size], device="cuda",
+                                dtype=torch.long)
+                ).unflatten(0, denoised_pred.shape[:2])
+            else:
+                # for getting real output
+                denoised_pred = self.generator(
+                    noisy_image_or_video=noise,
+                    conditional_dict=self.conditional_dict,
+                    timestep=timestep,
+                    kv_cache=self.kv_cache1,
+                    crossattn_cache=self.crossattn_cache,
+                    current_start=current_start,
+                    current_end=current_end
+                )
+
+        return denoised_pred
 
     def inference(self, noise: torch.Tensor, current_start: int, current_end: int, \
         current_step: int, block_mode: str='input', block_num=None,\
@@ -273,7 +333,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.kv_cache_starts.copy_(current_start)
             self.kv_cache_ends.copy_(current_end)
 
-        self.timestep[0] = current_step
+        if current_step is not None:
+            self.timestep[0] = current_step
         
         if block_mode == 'output':
             denoised_pred = self.generator.forward_output(

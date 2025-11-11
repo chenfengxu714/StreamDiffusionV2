@@ -243,7 +243,7 @@ class InferencePipelineManager:
                     self.t_dit = temp
             
             self.processed += 1
-            
+
             with torch.cuda.stream(self.com_stream):
                 if self.processed >= self.world_size:
                     if 'latent_data' in locals():
@@ -261,7 +261,7 @@ class InferencePipelineManager:
                     latent_data = self.data_transfer.receive_latent_data_async(num_steps)
             
             torch.cuda.current_stream().wait_stream(self.com_stream)
-            
+
             # Wait for outstanding operations
             while len(outstanding) >= self.config.get('max_outstanding', 1):
                 oldest = outstanding.pop(0)
@@ -290,7 +290,7 @@ class InferencePipelineManager:
             end_time = time.time()
             t = end_time - start_time
             self.logger.info(f"Encode {self.processed}, time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
-            
+
             if schedule_block:
                 t_total = self.t_dit + t_vae
                 if t_total < self.t_total:
@@ -451,6 +451,8 @@ class InferencePipelineManager:
         
         torch.cuda.synchronize()
         start_time = time.time()
+
+        fps_list = []
         
         while True:
             # Receive data from previous rank
@@ -521,6 +523,9 @@ class InferencePipelineManager:
             end_time = time.time()
             t = end_time - start_time
 
+            if self.processed > self.schedule_step:
+                fps_list.append(chunck_size/t)
+
             if schedule_block:
                 t_total = self.t_dit
                 if t_total < self.t_total:
@@ -533,6 +538,7 @@ class InferencePipelineManager:
             if self.processed + 3 >= num_chuncks + num_steps * self.world_size + self.world_size - self.rank - 1:
                 break
         
+        self.logger.info(f"DiT Average FPS: {np.mean(fps_list):.4f}")
         self.logger.info(f"Rank {self.rank} inference loop completed")
     
     def _handle_block_scheduling(self, block_num: torch.Tensor, total_blocks: int):
@@ -603,6 +609,7 @@ def main():
     parser.add_argument("--ring_size", type=int, default=1)
     parser.add_argument("--step", type=int, default=2)
     parser.add_argument("--schedule_block", action="store_true", default=False)
+    parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     
     args = parser.parse_args()
     
@@ -670,7 +677,7 @@ def main():
         block_mode = 'middle'
     
     # Setup block distribution
-    total_blocks = 30
+    total_blocks = pipeline_manager.pipeline.num_transformer_blocks
     if world_size == 2:
         total_block_num = [[0, 15], [15, total_blocks]]
     else:
