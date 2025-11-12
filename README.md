@@ -8,7 +8,7 @@
 
 <sup>*</sup> Work done when Tianrui Feng was a visiting student at UC Berkeley advised by Chenfeng Xu.
 
-[![Project](https://img.shields.io/badge/Homepage-project-orange.svg?logo=googlehome)](https://streamdiffusionv2.github.io/) [![arXiv](https://img.shields.io/badge/Arxiv-2507.02860-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2511.07399)
+[![Project](https://img.shields.io/badge/Homepage-project-orange.svg?logo=googlehome)](https://streamdiffusionv2.github.io/) [![arXiv](https://img.shields.io/badge/Arxiv-2511.07399-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2511.07399) [![Hugging Face](https://img.shields.io/badge/HuggingFace-Space-blue.svg?logo=huggingface)](https://huggingface.co/jerryfeng/StreamDiffusionV2)
 
 <p align="center">
   <image src="./assets/demo-1.gif" controls width="800">
