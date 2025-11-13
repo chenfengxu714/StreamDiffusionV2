@@ -115,11 +115,10 @@ We also especially thank DayDream team for the great collaboration and incorpora
 
 If you find this repository useful in your research, please consider giving a star ⭐ or a citation.
 ```BibTeX
-@article{streamdiffusionv2,
+@article{feng2025streamdiffusionv2,
   title={StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation},
-  author={Tianrui Feng and Zhi Li and Shuo Yang and Haocheng Xi and Muyang Li and Xiuyu Li and Lvmin Zhang and Keting Yang and Kelly Peng and Song Han and Maneesh Agrawala and Kurt Keutzer and Akio Kodaira and Chenfeng Xu},
-  journal={Project Page},
-  year={2025},
-  url={https://streamdiffusionv2.github.io/}
+  author={Feng, Tianrui and Li, Zhi and Yang, Shuo and Xi, Haocheng and Li, Muyang and Li, Xiuyu and Zhang, Lvmin and Yang, Keting and Peng, Kelly and Han, Song and others},
+  journal={arXiv preprint arXiv:2511.07399},
+  year={2025}
 }
 ```
