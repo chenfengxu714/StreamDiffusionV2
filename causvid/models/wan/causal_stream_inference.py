@@ -269,7 +269,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         return self.hidden_states
     
-    def inference_onestep(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
+    def inference_wo_batch(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
         batch_size = noise.shape[0]
 
         current_start = torch.ones(batch_size, dtype=torch.long, device=self.device) * current_start
