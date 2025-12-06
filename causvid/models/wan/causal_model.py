@@ -76,7 +76,8 @@ class CausalWanSelfAttention(nn.Module):
         self.qk_norm = qk_norm
         self.eps = eps
         
-        self.sink_size = 0
+        self.sink_size = 3
+        self.adapt_sink_thr = -1
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -148,6 +149,23 @@ class CausalWanSelfAttention(nn.Module):
             for i, c_start in enumerate(current_start):
                 current_end = c_start + roped_query.shape[1]
                 sink_tokens = self.sink_size * frame_seqlen
+                
+                if sink_tokens > 0 and self.adapt_sink_thr > -1 and v.shape[1] <= frame_seqlen:
+                    # Caculate similarity between new keys/values and the oldest ones in the cache
+                    k_sink_mean = kv_cache["k"][i:i+1, :sink_tokens].reshape(self.sink_size, frame_seqlen, -1).mean(1)
+                    k_new_mean = roped_key[i:i+1].reshape(1, frame_seqlen, -1).mean(1)
+                    k_cos_sim = torch.cosine_similarity(k_sink_mean, k_new_mean, dim=-1)
+
+                    v_sink_mean = kv_cache["v"][i:i+1, :sink_tokens].reshape(self.sink_size, frame_seqlen, -1).mean(1)
+                    v_new_mean = v[i:i+1].reshape(1, frame_seqlen, -1).mean(1)
+                    v_cos_sim = torch.cosine_similarity(v_sink_mean, v_new_mean, dim=-1).mean()
+
+                    avg_cos_sim = (k_cos_sim + v_cos_sim)/2
+                    # When the similarity is low, refresh the sink
+                    if avg_cos_sim.min() < self.adapt_sink_thr:
+                        idx = torch.argmin(avg_cos_sim)
+                        sink_tokens = idx * frame_seqlen
+
                 # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
                 kv_cache_size = kv_cache["k"].shape[1]
                 num_new_tokens = roped_query.shape[1]
@@ -610,7 +628,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             def custom_forward(*inputs, **kwargs):
                 return module(*inputs, **kwargs)
             return custom_forward
-
+        
         for block_index, block in enumerate(self.blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 assert False

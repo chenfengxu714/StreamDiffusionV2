@@ -16,7 +16,7 @@ import torch
 import torch.distributed as dist
 
 from vid2vid import Pipeline
-from streamv2v.inference_pipe import compute_noise_scale_and_step
+from streamv2v.inference import compute_noise_scale_and_step
 
 
 class MultiGPUPipeline(Pipeline):
@@ -83,6 +83,8 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
     is_running = False
     prompt = prompt_dict["prompt"]
 
+    torch.cuda.memory._record_memory_history(max_entries=100000)
+
     prepare_event.set()
 
     while not stop_event.is_set():
@@ -119,6 +121,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
 
             chunk_idx = 0
             noise_scale = args.noise_scale
+            init_noise_scale = args.noise_scale
             current_start = pipeline_manager.pipeline.frame_seq_length * 2
             current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
             last_image = images[:,:,[-1]]
@@ -142,9 +145,10 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             end_idx=first_batch_num_frames,
             chunck_size=chunk_size,
             noise_scale=float(noise_scale),
+            init_noise_scale=float(init_noise_scale),
         )
 
-        latents = pipeline_manager.pipeline.vae.model.stream_encode(images)  # [B, 4, T, H//16, W//16] or so
+        latents = pipeline_manager.pipeline.vae.stream_encode(images)  # [B, 4, T, H//16, W//16] or so
         latents = latents.transpose(2,1).contiguous().to(dtype=torch.bfloat16)
         noise = torch.randn_like(latents)
         noisy_latents = noise * noise_scale + latents * (1-noise_scale)
@@ -495,15 +499,15 @@ def prepare_pipeline(args, device, rank, world_size):
 
 
 def init_first_batch_for_input_process(args, device, pipeline_manager, images, prompt, block_num):
-    pipeline_manager.pipeline.vae.model.first_encode = True
     pipeline_manager.pipeline.kv_cache1 = None
     pipeline_manager.pipeline.crossattn_cache = None
+    pipeline_manager.pipeline.vae.model.first_encode = True
     pipeline_manager.pipeline.block_x = None
     pipeline_manager.pipeline.hidden_states = None
     torch.cuda.empty_cache()
 
     pipeline_manager.processed = 0
-    latents = pipeline_manager.pipeline.vae.model.stream_encode(images)
+    latents = pipeline_manager.pipeline.vae.stream_encode(images)
     latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
     noise = torch.randn_like(latents)
     noisy_latents = noise * args.noise_scale + latents * (1 - args.noise_scale)
@@ -528,9 +532,9 @@ def init_first_batch_for_input_process(args, device, pipeline_manager, images, p
 
 
 def init_first_batch_for_output_process(args, device, pipeline_manager, prompt, block_num):
-    pipeline_manager.pipeline.vae.model.first_decode = True
     pipeline_manager.pipeline.kv_cache1 = None
     pipeline_manager.pipeline.crossattn_cache = None
+    pipeline_manager.pipeline.vae.model.first_decode = True
     pipeline_manager.pipeline.block_x = None
     pipeline_manager.pipeline.hidden_states = None
     torch.cuda.empty_cache()

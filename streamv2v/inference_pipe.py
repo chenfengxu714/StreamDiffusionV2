@@ -6,6 +6,7 @@ communication abstraction layers for better code organization and maintainabilit
 """
 
 from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
+from streamv2v.inference import compute_noise_scale_and_step
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
 from omegaconf import OmegaConf
@@ -16,7 +17,6 @@ import torch.multiprocessing as mp
 import os
 import time
 import numpy as np
-import logging
 
 import torchvision
 import torchvision.transforms.functional as TF
@@ -73,14 +73,6 @@ def load_mp4_as_tensor(
 
     return video  # [C, T, H, W]
 
-
-def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: int, chunck_size: int, noise_scale: float):
-    """Compute adaptive noise scale and current step based on video content."""
-    l2_dist=(input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
-    l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-    new_noise_scale = (0.9-0.2*l2_dist.item())*0.9+noise_scale*0.1
-    current_step = int(1000*new_noise_scale)-100
-    return new_noise_scale, current_step
 
 
 class InferencePipelineManager:
@@ -185,6 +177,7 @@ class InferencePipelineManager:
         end_idx = 5
         current_start = 0
         current_end = self.pipeline.frame_seq_length * 2
+        init_noise_scale = noise_scale
         
         outstanding = []
         
@@ -206,10 +199,10 @@ class InferencePipelineManager:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
                 noise_scale, current_step = compute_noise_scale_and_step(
-                    input_video_original, end_idx, chunck_size, noise_scale
+                    input_video_original, end_idx, chunck_size, noise_scale, init_noise_scale
                 )
                 
-                latents = self.pipeline.vae.model.stream_encode(inp)
+                latents = self.pipeline.vae.stream_encode(inp)
                 latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
                 
                 noise = torch.randn_like(latents)
@@ -243,7 +236,7 @@ class InferencePipelineManager:
                     self.t_dit = temp
             
             self.processed += 1
-
+            
             with torch.cuda.stream(self.com_stream):
                 if self.processed >= self.world_size:
                     if 'latent_data' in locals():
@@ -261,7 +254,7 @@ class InferencePipelineManager:
                     latent_data = self.data_transfer.receive_latent_data_async(num_steps)
             
             torch.cuda.current_stream().wait_stream(self.com_stream)
-
+            
             # Wait for outstanding operations
             while len(outstanding) >= self.config.get('max_outstanding', 1):
                 oldest = outstanding.pop(0)
@@ -290,7 +283,7 @@ class InferencePipelineManager:
             end_time = time.time()
             t = end_time - start_time
             self.logger.info(f"Encode {self.processed}, time: {t:.4f} s, fps: {inp.shape[2]/t:.4f}")
-
+            
             if schedule_block:
                 t_total = self.t_dit + t_vae
                 if t_total < self.t_total:
@@ -598,7 +591,7 @@ def main():
     parser.add_argument("--output_folder", type=str)
     parser.add_argument("--prompt_file_path", type=str)
     parser.add_argument("--video_path", type=str)
-    parser.add_argument("--noise_scale", type=float, default=0.700)
+    parser.add_argument("--noise_scale", type=float, default=0.8)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--width", type=int, default=832)
     parser.add_argument("--fps", type=int, default=30)
@@ -703,7 +696,7 @@ def main():
     
     # Only rank 0 performs VAE encoding operation
     if rank == 0:
-        latents = pipeline_manager.pipeline.vae.model.stream_encode(inp)
+        latents = pipeline_manager.pipeline.vae.stream_encode(inp)
         latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
         noise = torch.randn_like(latents)
         noisy_latents = noise * args.noise_scale + latents * (1 - args.noise_scale)

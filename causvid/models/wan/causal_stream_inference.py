@@ -38,6 +38,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.frame_seq_length = (args.height//scale_size) * (args.width//scale_size)
         self.kv_cache_length = self.frame_seq_length*args.num_kv_cache
         self.num_sink_tokens = args.num_sink_tokens
+        self.adapt_sink_threshold = args.adapt_sink_threshold
 
         self.conditional_dict = None
         self.kv_cache1 = None
@@ -76,6 +77,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         for i in range(self.num_transformer_blocks):
             cache_length = self.kv_cache_length
             self.generator.model.blocks[i].self_attn.sink_size = self.num_sink_tokens
+            self.generator.model.blocks[i].self_attn.adapt_sink_thr = self.adapt_sink_threshold
 
             kv_cache1.append({
                 "k": torch.zeros([batch_size, cache_length, self.num_heads, 128], dtype=dtype, device=device),

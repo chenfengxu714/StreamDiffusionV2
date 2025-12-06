@@ -22,6 +22,7 @@ import logging
 import torchvision
 import torchvision.transforms.functional as TF
 from einops import rearrange
+from streamv2v.inference import compute_noise_scale_and_step
 
 
 def load_mp4_as_tensor(
@@ -61,15 +62,6 @@ def load_mp4_as_tensor(
         video = video / 127.5 - 1.0
 
     return video  # [C, T, H, W]
-
-
-def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: int, chunck_size: int, noise_scale: float):
-    """Compute adaptive noise scale and current step based on video content."""
-    l2_dist = (input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
-    l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-    new_noise_scale = (0.8-0.1*l2_dist.item())*0.9+noise_scale*0.1
-    current_step = int(1000*new_noise_scale)-100
-    return new_noise_scale, current_step
 
 
 class SingleGPUInferencePipeline:
@@ -157,6 +149,7 @@ class SingleGPUInferencePipeline:
         end_idx = 5
         current_start = 0
         current_end = self.pipeline.frame_seq_length * 2
+        init_noise_scale = noise_scale
         
         torch.cuda.synchronize()
         start_time = time.time()
@@ -164,10 +157,6 @@ class SingleGPUInferencePipeline:
         # Process first chunk (initialization)
         if end_idx <= input_video_original.shape[2]:
             inp = input_video_original[:, :, start_idx:end_idx]
-            
-            noise_scale, current_step = compute_noise_scale_and_step(
-                input_video_original, end_idx, chunck_size, noise_scale
-            )
             
             # VAE encoding
             latents = self.pipeline.vae.model.stream_encode(inp)
@@ -204,7 +193,7 @@ class SingleGPUInferencePipeline:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
                 noise_scale, current_step = compute_noise_scale_and_step(
-                    input_video_original, end_idx, chunck_size, noise_scale
+                    input_video_original, end_idx, chunck_size, noise_scale, init_noise_scale
                 )
                 
                 # VAE encoding

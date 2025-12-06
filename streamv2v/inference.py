@@ -62,15 +62,13 @@ def load_mp4_as_tensor(
 
     return video  # [C, T, H, W]
 
-
-def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: int, chunck_size: int, noise_scale: float):
+def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: int, chunck_size: int, noise_scale: float, init_noise_scale: float):
     """Compute adaptive noise scale and current step based on video content."""
-    l2_dist = (input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
+    l2_dist=(input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
     l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
-    new_noise_scale = (0.9-0.2*l2_dist.item())*0.9+noise_scale*0.1
+    new_noise_scale = (init_noise_scale-0.1*l2_dist.item())*0.9+noise_scale*0.1
     current_step = int(1000*new_noise_scale)-100
     return new_noise_scale, current_step
-
 
 class SingleGPUInferencePipeline:
     """
@@ -111,6 +109,7 @@ class SingleGPUInferencePipeline:
         self.t_dit = 100.0
         self.t_total = 100.0
         self.processed = 0
+
         
         self.logger.info("Single GPU inference pipeline manager initialized")
     
@@ -187,12 +186,8 @@ class SingleGPUInferencePipeline:
         if input_video_original is not None:
             inp = input_video_original[:, :, start_idx:end_idx]
             
-            noise_scale, current_step = compute_noise_scale_and_step(
-                input_video_original, end_idx, chunck_size, noise_scale
-            )
-            
             # VAE encoding
-            latents = self.pipeline.vae.model.stream_encode(inp)
+            latents = self.pipeline.vae.stream_encode(inp)
             latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
             
             noise = torch.randn_like(latents)
@@ -216,6 +211,8 @@ class SingleGPUInferencePipeline:
         results[save_results] = video.cpu().float().numpy()
         save_results += 1
         
+        init_noise_scale = noise_scale
+        
         # Process remaining chunks
         while self.processed < num_chuncks + num_steps - 1:
             # Update indices
@@ -228,11 +225,11 @@ class SingleGPUInferencePipeline:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
                 noise_scale, current_step = compute_noise_scale_and_step(
-                    input_video_original, end_idx, chunck_size, noise_scale
+                    input_video_original, end_idx, chunck_size, noise_scale, init_noise_scale
                 )
                 
                 # VAE encoding
-                latents = self.pipeline.vae.model.stream_encode(inp)
+                latents = self.pipeline.vae.stream_encode(inp)
                 latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
                 
                 noise = torch.randn_like(latents)

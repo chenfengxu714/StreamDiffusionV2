@@ -543,7 +543,7 @@ class WanVAE_(nn.Module):
         self.clear_cache()
         return mu
 
-    def stream_encode(self, x):
+    def stream_encode(self, x, scale):
         # cache
         t = x.shape[2]
         if self.first_encode:
@@ -573,6 +573,12 @@ class WanVAE_(nn.Module):
                     ))
             out = torch.cat(out, 2)
         mu, log_var = self.conv1(out).chunk(2, dim=1)
+        if scale is not None:
+            if isinstance(scale[0], torch.Tensor):
+                mu = (mu - scale[0].view(1, self.z_dim, 1, 1, 1)) * scale[1].view(
+                    1, self.z_dim, 1, 1, 1)
+            else:
+                mu = (mu - scale[0]) * scale[1]
         # self.clear_cache()
         return mu
 
