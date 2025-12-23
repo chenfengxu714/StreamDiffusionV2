@@ -148,7 +148,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             init_noise_scale=float(init_noise_scale),
         )
 
-        latents = pipeline_manager.pipeline.vae.stream_encode(images)  # [B, 4, T, H//16, W//16] or so
+        latents = pipeline_manager.pipeline.vae.stream_encode(images, is_scale=False)  # [B, 4, T, H//16, W//16] or so
         latents = latents.transpose(2,1).contiguous().to(dtype=torch.bfloat16)
         noise = torch.randn_like(latents)
         noisy_latents = noise * noise_scale + latents * (1-noise_scale)
@@ -507,7 +507,7 @@ def init_first_batch_for_input_process(args, device, pipeline_manager, images, p
     torch.cuda.empty_cache()
 
     pipeline_manager.processed = 0
-    latents = pipeline_manager.pipeline.vae.stream_encode(images)
+    latents = pipeline_manager.pipeline.vae.stream_encode(images, is_scale=False)
     latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
     noise = torch.randn_like(latents)
     noisy_latents = noise * args.noise_scale + latents * (1 - args.noise_scale)

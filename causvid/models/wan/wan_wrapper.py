@@ -29,8 +29,10 @@ class WanTextEncoder(TextEncoderInterface):
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
         self.text_encoder.load_state_dict(
-            torch.load(f"wan_models/Wan2.1-{model_type}/models_t5_umt5-xxl-enc-bf16.pth",
-                       map_location='cpu', weights_only=False)
+            torch.load(
+                os.path.join(repo_root, f"wan_models/Wan2.1-{model_type}/models_t5_umt5-xxl-enc-bf16.pth"),
+                map_location='cpu', weights_only=False
+            )
         )
 
         self.tokenizer = HuggingfaceTokenizer(
@@ -72,7 +74,7 @@ class WanVAEWrapper(VAEInterface):
 
         # init model
         self.model = _video_vae(
-            pretrained_path=f"wan_models/Wan2.1-{model_type}/Wan2.1_VAE.pth",
+            pretrained_path=os.path.join(repo_root, f"wan_models/Wan2.1-{model_type}/Wan2.1_VAE.pth"),
             z_dim=16,
         ).eval().requires_grad_(False)
 
@@ -135,7 +137,7 @@ class WanDiffusionWrapper(DiffusionModelInterface):
     def __init__(self, model_type="T2V-1.3B"):
         super().__init__()
 
-        self.model = WanModel.from_pretrained(f"wan_models/Wan2.1-{model_type}/")
+        self.model = WanModel.from_pretrained(os.path.join(repo_root, f"wan_models/Wan2.1-{model_type}/"))
         self.model.eval()
 
         self.uniform_timestep = True
@@ -325,7 +327,7 @@ class CausalWanDiffusionWrapper(WanDiffusionWrapper):
         super().__init__()
 
         self.model = CausalWanModel.from_pretrained(
-            f"wan_models/Wan2.1-{model_type}/")
+            os.path.join(repo_root, f"wan_models/Wan2.1-{model_type}/"))
         self.model.eval()
 
         self.uniform_timestep = False

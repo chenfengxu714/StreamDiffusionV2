@@ -19,6 +19,7 @@ class Args(NamedTuple):
     gpu_ids: str
     max_outstanding: int
     schedule_block: bool
+    model_type: str
 
     def pretty_print(self):
         print("\n")
@@ -71,5 +72,6 @@ parser.add_argument("--gpu_ids", type=str, default="0,1") # id separated by comm
 # These are only used when num_gpus > 1
 parser.add_argument("--max_outstanding", type=int, default=2, help="max number of outstanding sends/recv to keep")
 parser.add_argument("--schedule_block", action="store_true", default=False)
+parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
 
 config = Args(**vars(parser.parse_args()))
