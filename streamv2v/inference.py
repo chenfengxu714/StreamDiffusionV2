@@ -343,7 +343,7 @@ def main():
         t = args.num_frames
     
     # Calculate number of chunks
-    chunck_size = 4
+    chunck_size = 4 * config.num_frame_per_block
     num_chuncks = (t - 1) // chunck_size
     
     # Initialize pipeline manager
