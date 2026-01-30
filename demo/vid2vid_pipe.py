@@ -78,8 +78,8 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
 
     pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
     num_steps = len(pipeline_manager.pipeline.denoising_step_list)
-    first_batch_num_frames = 5
-    chunk_size = 4
+    chunk_size = 4 * args.num_frame_per_block
+    first_batch_num_frames = 1 + chunk_size
     is_running = False
     prompt = prompt_dict["prompt"]
 
@@ -122,7 +122,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             chunk_idx = 0
             noise_scale = args.noise_scale
             init_noise_scale = args.noise_scale
-            current_start = pipeline_manager.pipeline.frame_seq_length * 2
+            current_start = pipeline_manager.pipeline.frame_seq_length * (1 + chunk_size//4)
             current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
             last_image = images[:,:,[-1]]
             outstanding = []
@@ -143,7 +143,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
         noise_scale, current_step = compute_noise_scale_and_step(
             input_video_original=torch.cat([last_image, images], dim=2),
             end_idx=first_batch_num_frames,
-            chunck_size=chunk_size,
+            chunk_size=chunk_size,
             noise_scale=float(noise_scale),
             init_noise_scale=float(init_noise_scale),
         )

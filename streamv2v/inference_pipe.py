@@ -162,7 +162,7 @@ class InferencePipelineManager:
         return denoised_pred
     
     def run_rank_0_loop(self, input_video_original: torch.Tensor, prompts: list, 
-                       num_chuncks: int, num_steps: int, chunck_size: int,
+                       num_chunks: int, num_steps: int, chunk_size: int,
                        block_num: torch.Tensor, noise_scale: float, 
                        schedule_block: bool, total_blocks: int):
         """
@@ -187,9 +187,9 @@ class InferencePipelineManager:
         while True:
             # Process new chunk if available
             start_idx = end_idx
-            end_idx = end_idx + chunck_size
+            end_idx = end_idx + chunk_size
             current_start = current_end
-            current_end = current_end + (chunck_size // 4) * self.pipeline.frame_seq_length
+            current_end = current_end + (chunk_size // 4) * self.pipeline.frame_seq_length
 
             if schedule_block:
                 torch.cuda.synchronize()
@@ -199,7 +199,7 @@ class InferencePipelineManager:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
                 noise_scale, current_step = compute_noise_scale_and_step(
-                    input_video_original, end_idx, chunck_size, noise_scale, init_noise_scale
+                    input_video_original, end_idx, chunk_size, noise_scale, init_noise_scale
                 )
                 
                 latents = self.pipeline.vae.stream_encode(inp)
@@ -210,7 +210,7 @@ class InferencePipelineManager:
 
             if current_start//self.pipeline.frame_seq_length >= 50:
                 current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
-                current_end = current_start + (chunck_size // 4) * self.pipeline.frame_seq_length
+                current_end = current_start + (chunk_size // 4) * self.pipeline.frame_seq_length
             
             # Measure DiT time if scheduling is enabled
             if schedule_block:
@@ -296,12 +296,12 @@ class InferencePipelineManager:
             
             start_time = end_time
 
-            if self.processed + 3 >= num_chuncks + num_steps * self.world_size + self.world_size - self.rank - 1:
+            if self.processed + 3 >= num_chunks + num_steps * self.world_size + self.world_size - self.rank - 1:
                 break
         
         self.logger.info("Rank 0 inference loop completed")
     
-    def run_final_rank_loop(self, num_chuncks: int, num_steps: int, chunck_size: int,
+    def run_final_rank_loop(self, num_chunks: int, num_steps: int, chunk_size: int,
                            block_num: torch.Tensor, output_folder: str, fps: int,
                            schedule_block: bool, total_blocks: int, results: dict):
         """
@@ -321,7 +321,7 @@ class InferencePipelineManager:
         torch.cuda.synchronize()
         start_time = time.time()
         
-        while save_results < num_chuncks:
+        while save_results < num_chunks:
             # Receive data from previous rank
             with torch.cuda.stream(self.com_stream):
                 if 'latent_data' in locals():
@@ -416,11 +416,11 @@ class InferencePipelineManager:
                 save_results += 1
                 start_time = end_time
                 
-            if save_results >= num_chuncks:
+            if save_results >= num_chunks:
                 break
         
         # Save final video
-        video_list = [results[i] for i in range(num_chuncks)]
+        video_list = [results[i] for i in range(num_chunks)]
         video = np.concatenate(video_list, axis=0)
 
         fps_list = np.array(fps_list)
@@ -431,7 +431,7 @@ class InferencePipelineManager:
         export_to_video(video, output_path, fps=fps)
         self.logger.info(f"Video saved to: {output_path} (Press Ctrl+C to force exit)")
     
-    def run_middle_rank_loop(self, num_chuncks: int, num_steps: int, chunck_size: int,
+    def run_middle_rank_loop(self, num_chunks: int, num_steps: int, chunk_size: int,
                             block_num: torch.Tensor, schedule_block: bool, total_blocks: int):
         """
         Run the main loop for middle ranks (async receiver + dit blocks + sender).
@@ -517,18 +517,18 @@ class InferencePipelineManager:
             t = end_time - start_time
 
             if self.processed > self.schedule_step:
-                fps_list.append(chunck_size/t)
+                fps_list.append(chunk_size/t)
 
             if schedule_block:
                 t_total = self.t_dit
                 if t_total < self.t_total:
                     self.t_total = t_total
             
-            self.logger.info(f"Middle {self.processed}, time: {t:.4f} s, fps: {chunck_size/t:.4f}")
+            self.logger.info(f"Middle {self.processed}, time: {t:.4f} s, fps: {chunk_size/t:.4f}")
 
             start_time = end_time
 
-            if self.processed + 3 >= num_chuncks + num_steps * self.world_size + self.world_size - self.rank - 1:
+            if self.processed + 3 >= num_chunks + num_steps * self.world_size + self.world_size - self.rank - 1:
                 break
         
         self.logger.info(f"DiT Average FPS: {np.mean(fps_list):.4f}")
@@ -643,14 +643,14 @@ def main():
     b, c, t, h, w = input_video_original.shape
     
     # Calculate number of chunks
-    chunck_size = 4 * config.num_frame_per_block
+    chunk_size = 4 * config.num_frame_per_block
     if rank == 0:
-        num_chuncks = (t - 1) // chunck_size
+        num_chunks = (t - 1) // chunk_size
     else:
-        num_chuncks = 0
-    num_chuncks_tensor = torch.tensor([num_chuncks], dtype=torch.int64, device=device)
-    dist.broadcast(num_chuncks_tensor, src=0)
-    num_chuncks = int(num_chuncks_tensor.item())
+        num_chunks = 0
+    num_chunks_tensor = torch.tensor([num_chunks], dtype=torch.int64, device=device)
+    dist.broadcast(num_chunks_tensor, src=0)
+    num_chunks = int(num_chunks_tensor.item())
     
     # Initialize pipeline manager
     pipeline_manager = InferencePipelineManager(config, device, rank, world_size)
@@ -746,17 +746,17 @@ def main():
     try:
         if rank == 0:
             pipeline_manager.run_rank_0_loop(
-                input_video_original, prompts, num_chuncks, num_steps, chunck_size,
+                input_video_original, prompts, num_chunks, num_steps, chunk_size,
                 block_num, args.noise_scale, args.schedule_block, total_blocks
             )
         elif rank == world_size - 1:
             pipeline_manager.run_final_rank_loop(
-                num_chuncks, num_steps, chunck_size, block_num, args.output_folder,
+                num_chunks, num_steps, chunk_size, block_num, args.output_folder,
                 args.fps, args.schedule_block, total_blocks, results
             )
         else:
             pipeline_manager.run_middle_rank_loop(
-                num_chuncks, num_steps, chunck_size, block_num, args.schedule_block, total_blocks
+                num_chunks, num_steps, chunk_size, block_num, args.schedule_block, total_blocks
             )
     finally:
         # Cleanup

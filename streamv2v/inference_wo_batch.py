@@ -129,7 +129,7 @@ class SingleGPUInferencePipeline:
         return denoised_pred
     
     def run_inference(self, input_video_original: torch.Tensor, prompts: list, 
-                     num_chuncks: int, chunck_size: int, noise_scale: float, 
+                     num_chunks: int, chunk_size: int, noise_scale: float, 
                      output_folder: str, fps: int, num_steps: int):
         """
         Run the complete single GPU inference pipeline.
@@ -182,18 +182,18 @@ class SingleGPUInferencePipeline:
             save_results += 1
         
         # Process remaining chunks
-        while self.processed < num_chuncks + num_steps - 1:
+        while self.processed < num_chunks + num_steps - 1:
             # Update indices
             start_idx = end_idx
-            end_idx = end_idx + chunck_size
+            end_idx = end_idx + chunk_size
             current_start = current_end
-            current_end = current_end + (chunck_size // 4) * self.pipeline.frame_seq_length
+            current_end = current_end + (chunk_size // 4) * self.pipeline.frame_seq_length
             
             if end_idx <= input_video_original.shape[2]:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
                 noise_scale, current_step = compute_noise_scale_and_step(
-                    input_video_original, end_idx, chunck_size, noise_scale, init_noise_scale
+                    input_video_original, end_idx, chunk_size, noise_scale, init_noise_scale
                 )
                 
                 # VAE encoding
@@ -205,7 +205,7 @@ class SingleGPUInferencePipeline:
 
             if current_start//self.pipeline.frame_seq_length >= 50:
                 current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
-                current_end = current_start + (chunck_size // 4) * self.pipeline.frame_seq_length
+                current_end = current_start + (chunk_size // 4) * self.pipeline.frame_seq_length
                 
             # DiT inference - using input mode to process all 30 blocks
             denoised_pred = self.pipeline.inference_wo_batch(
@@ -235,7 +235,7 @@ class SingleGPUInferencePipeline:
             start_time = end_time
         
         # Save final video
-        video_list = [results[i] for i in range(num_chuncks)]
+        video_list = [results[i] for i in range(num_chunks)]
         video = np.concatenate(video_list, axis=0)
         fps_avg = np.mean(np.array(fps_list))
         self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
@@ -293,8 +293,8 @@ def main():
     b, c, t, h, w = input_video_original.shape
     
     # Calculate number of chunks
-    chunck_size = 4 * config.num_frame_per_block
-    num_chuncks = (t - 1) // chunck_size
+    chunk_size = 4 * config.num_frame_per_block
+    num_chunks = (t - 1) // chunk_size
     
     # Initialize pipeline manager
     pipeline_manager = SingleGPUInferencePipeline(config, device)
@@ -308,7 +308,7 @@ def main():
     # Run inference
     try:
         pipeline_manager.run_inference(
-            input_video_original, prompts, num_chuncks, chunck_size, 
+            input_video_original, prompts, num_chunks, chunk_size, 
             args.noise_scale, args.output_folder, args.fps, num_steps
         )
     except Exception as e:

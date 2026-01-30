@@ -44,24 +44,20 @@ def is_firefox(user_agent: str) -> bool:
 
 
 def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=False):
-    # print(f"Queue size: {queue.qsize()}")
+    # Wait until we have enough frames
     while queue.qsize() < num_frames_needed:
         if stop_event and stop_event.is_set():
             return None
         time.sleep(0.05)
+    # print(f"Reading {num_frames_needed} frames from queue of size {queue.qsize()}")
 
-    if prefer_latest:
-        read_size = queue.qsize()
-    else:
-        read_size = min(queue.qsize(), num_frames_needed * 2)
+    # Read exactly num_frames_needed frames in order (FIFO), don't discard any frames
     images = []
-    for _ in range(read_size):
+    for _ in range(num_frames_needed):
         images.append(queue.get())
 
-    if prefer_latest:
-        images = np.stack(images[-num_frames_needed:], axis=0)
-    else:
-        images = select_images(images, num_frames_needed)
+    # Stack images in order (FIFO)
+    images = np.stack(images, axis=0)
     images = torch.from_numpy(images).unsqueeze(0)
     images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=device)
     return images

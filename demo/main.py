@@ -18,6 +18,7 @@ import threading
 import multiprocessing as mp
 import signal
 import sys
+from collections import deque
 
 from config import config, Args
 from util import pil_to_frame, bytes_to_pil, is_firefox
@@ -39,6 +40,21 @@ class App:
         self.produce_predictions_stop_event = None
         self.produce_predictions_task = None
         self.shutdown_event = asyncio.Event()
+        # Initialize metrics collection only if enabled
+        self.enable_metrics = config.enable_metrics
+        self.target_latency = config.target_latency  # Target latency in seconds for deadline miss rate
+        self.step = config.step  # Pipeline step parameter
+        self.gpu_ids = config.gpu_ids  # GPU IDs (e.g., "0,1" or "0")
+        if self.enable_metrics:
+            # Simple timestamp queue for input frames (FIFO)
+            self.user_input_timestamps = {}  # user_id -> deque of input timestamps
+            self.user_metrics_lock = threading.Lock()  # Lock for thread-safe timestamp tracking
+            # Track metrics collection count per user (number of batches collected)
+            self.user_batch_count = {}  # user_id -> count of batches collected
+            self.user_latency_history = {}  # user_id -> list of latencies for statistics
+            self.user_raw_data = {}  # user_id -> list of raw batch data (for logging)
+            self.metrics_log_dir = "./slo_metrics"
+            os.makedirs(self.metrics_log_dir, exist_ok=True)
         self.init_app()
 
     def init_app(self):
@@ -62,6 +78,13 @@ class App:
             finally:
                 # Do not block shutdown here; schedule disconnect
                 asyncio.create_task(self.conn_manager.disconnect(user_id, self.pipeline))
+                # Clean up metrics and timestamp tracking for this user
+                if self.enable_metrics:
+                    with self.user_metrics_lock:
+                        self.user_input_timestamps.pop(user_id, None)
+                        self.user_batch_count.pop(user_id, None)
+                        self.user_latency_history.pop(user_id, None)
+                        self.user_raw_data.pop(user_id, None)
                 if self.produce_predictions_stop_event is not None:
                     self.produce_predictions_stop_event.set()
                 if self.produce_predictions_task is not None:
@@ -73,6 +96,10 @@ class App:
                 return HTTPException(status_code=404, detail="User not found")
             last_time = time.time()
             last_frame_time = None
+            # 16 FPS throttling: minimum interval between frames (1/16 seconds)
+            TARGET_FPS = 16.0
+            min_frame_interval = 1.0 / TARGET_FPS
+            last_frame_received_time = None
             try:
                 while True:
                     if (
@@ -131,10 +158,22 @@ class App:
                                 )
                                 # await asyncio.sleep(sleep_time)
                                 continue
+                            
+                            # 16 FPS throttling: only process frames at 16 FPS rate
+                            current_time = time.time()
+                            if last_frame_received_time is not None:
+                                time_since_last_frame = current_time - last_frame_received_time
+                                if time_since_last_frame < min_frame_interval:
+                                    # Skip this frame to maintain 16 FPS
+                                    await self.conn_manager.send_json(user_id, {"status": "send_frame"})
+                                    continue
+                            
+                            last_frame_received_time = current_time
+                            
                             # If upload mode and not completed, append frames to cache for later reuse
                             if is_upload_mode and not upload_completed:
                                 await self.conn_manager.add_video_frame(user_id, image_data)
-                                print(f"[Main] Added frame to video queue for user {user_id}")
+                                print(f"[Main] Added frame to video queue for user {user_id} (16 FPS throttled)")
                             # For camera mode, set current image directly
                             if not is_upload_mode:
                                 params.image = bytes_to_pil(image_data)
@@ -157,6 +196,37 @@ class App:
         async def get_queue_size():
             queue_size = self.conn_manager.get_user_count()
             return JSONResponse({"queue_size": queue_size})
+        
+        @self.app.get("/api/metrics/{user_id}")
+        async def get_metrics(user_id: uuid.UUID, window_size: int = 100):
+            """Get SLO metrics for a specific user"""
+            if not self.enable_metrics:
+                return JSONResponse({"error": "Metrics collection is not enabled"}, status_code=400)
+            try:
+                import numpy as np
+                with self.user_metrics_lock:
+                    if user_id not in self.user_latency_history or len(self.user_latency_history[user_id]) == 0:
+                        return JSONResponse({"error": "No metrics data available"}, status_code=404)
+                    
+                    latencies = np.array(self.user_latency_history[user_id][-window_size:])
+                    
+                    stats = {
+                        "mean_latency": float(np.mean(latencies)),
+                        "median_latency": float(np.median(latencies)),
+                        "p95_latency": float(np.percentile(latencies, 95)),
+                        "p99_latency": float(np.percentile(latencies, 99)),
+                        "min_latency": float(np.min(latencies)),
+                        "max_latency": float(np.max(latencies)),
+                        "std_latency": float(np.std(latencies)),
+                        "sample_count": len(latencies),
+                        "remaining_frames": len(self.user_input_timestamps.get(user_id, deque())),
+                        "batch_count": self.user_batch_count.get(user_id, 0)
+                    }
+                    
+                    return JSONResponse(stats)
+            except Exception as e:
+                logging.error(f"Error getting metrics: {e}")
+                return JSONResponse({"error": str(e)}, status_code=500)
 
         @self.app.get("/api/stream/{user_id}")
         async def stream(user_id: uuid.UUID, request: Request):
@@ -164,25 +234,45 @@ class App:
                 async def push_frames_to_pipeline():
                     last_params = SimpleNamespace()
                     sleep_time = 1 / 20  # Initial guess
+                    # 16 FPS throttling for upload mode
+                    TARGET_FPS = 16.0
+                    min_frame_interval = 1.0 / TARGET_FPS
+                    last_frame_sent_time = None
                     while True:
                         # Check if upload mode is enabled
                         video_status = self.conn_manager.get_video_queue_status(user_id)
                         is_upload_mode = video_status.get("is_upload_mode", False)
                         
                         if is_upload_mode:
-                            # Upload mode: get next frame from video queue
+                            # Upload mode: get next frame from video queue with 16 FPS throttling
+                            current_time = time.time()
+                            if last_frame_sent_time is not None:
+                                time_since_last_frame = current_time - last_frame_sent_time
+                                if time_since_last_frame < min_frame_interval:
+                                    # Wait to maintain 16 FPS
+                                    await asyncio.sleep(min_frame_interval - time_since_last_frame)
+                            
                             video_frame = await self.conn_manager.get_next_video_frame(user_id)
                             if video_frame:
+                                last_frame_sent_time = time.time()
                                 # Create params object with video frame
                                 params = SimpleNamespace()
                                 params.image = bytes_to_pil(video_frame)
                                 # Copy other parameters
                                 if vars(last_params):
                                     for key, value in last_params.__dict__.items():
-                                        if key != 'image':
+                                        if key != 'image' and key != '_frame_id':
                                             setattr(params, key, value)
                                 
                                 if params.__dict__ != last_params.__dict__:
+                                    # Record input timestamp when frame is added to pipeline queue
+                                    if self.enable_metrics:
+                                        input_timestamp = time.time()
+                                        with self.user_metrics_lock:
+                                            if user_id not in self.user_input_timestamps:
+                                                self.user_input_timestamps[user_id] = deque()
+                                            self.user_input_timestamps[user_id].append(input_timestamp)
+                                    
                                     last_params = params
                                     self.pipeline.accept_new_params(params)
                                     print(f"[Main] Upload mode: sent frame to pipeline for user {user_id}")
@@ -196,6 +286,13 @@ class App:
                             params = await self.conn_manager.get_latest_data(user_id)
                             if vars(params) and params.__dict__ != last_params.__dict__:
                                 last_params = params
+                                # Record input timestamp when frame is added to pipeline queue
+                                if self.enable_metrics:
+                                    input_timestamp = time.time()
+                                    with self.user_metrics_lock:
+                                        if user_id not in self.user_input_timestamps:
+                                            self.user_input_timestamps[user_id] = deque()
+                                        self.user_input_timestamps[user_id].append(input_timestamp)
                                 self.pipeline.accept_new_params(params)
                             await self.conn_manager.send_json(
                                 user_id, {"status": "send_frame"}
@@ -234,6 +331,9 @@ class App:
                             frame = await self.conn_manager.get_frame(user_id)
                             if frame is None:
                                 break
+                            
+                            # Output timestamp is already recorded in produce_predictions
+                            
                             yield frame
                             if not is_firefox(request.headers["user-agent"]):
                                 yield frame
@@ -256,6 +356,65 @@ class App:
                         if len(images) == 0:
                             time.sleep(THROTTLE)
                             continue
+                        
+                        # Calculate latency for each output frame using FIFO timestamp queue
+                        if self.enable_metrics:
+                            output_timestamp = time.time()
+                            batch_latencies = []
+                            
+                            with self.user_metrics_lock:
+                                if user_id in self.user_input_timestamps:
+                                    # For each output frame, get corresponding input timestamp (FIFO)
+                                    for _ in range(len(images)):
+                                        if len(self.user_input_timestamps[user_id]) > 0:
+                                            input_timestamp = self.user_input_timestamps[user_id].popleft()
+                                            latency = output_timestamp - input_timestamp
+                                            batch_latencies.append(latency)
+                                            
+                                            # Add to history for statistics
+                                            if user_id not in self.user_latency_history:
+                                                self.user_latency_history[user_id] = []
+                                            self.user_latency_history[user_id].append(latency)
+                                    
+                                    # Print batch statistics
+                                    if len(batch_latencies) > 0:
+                                        avg_latency = sum(batch_latencies) / len(batch_latencies)
+                                        remaining_frames = len(self.user_input_timestamps[user_id])
+                                        
+                                        # Get batch count
+                                        if user_id not in self.user_batch_count:
+                                            self.user_batch_count[user_id] = 0
+                                        self.user_batch_count[user_id] += 1
+                                        batch_num = self.user_batch_count[user_id]
+                                        
+                                        # Prepare raw batch data
+                                        raw_batch_data = {
+                                            "batch_num": batch_num,
+                                            "current_frames": len(batch_latencies),
+                                            "avg_latency": avg_latency,
+                                            "remaining": remaining_frames,
+                                            "data_count": len(self.user_latency_history[user_id])
+                                        }
+                                        
+                                        # Store raw data
+                                        if user_id not in self.user_raw_data:
+                                            self.user_raw_data[user_id] = []
+                                        self.user_raw_data[user_id].append(raw_batch_data)
+                                        
+                                        print(f"[Metrics] Batch {batch_num}/1000: "
+                                              f"current_frames={len(batch_latencies)}, "
+                                              f"avg_latency={avg_latency:.4f}s, "
+                                              f"remaining={remaining_frames}, "
+                                              f"data_count={len(self.user_latency_history[user_id])}")
+                                        
+                                        # Log after 1000 batches
+                                        if batch_num >= 1000:
+                                            self._log_metrics_to_file(user_id)
+                                            # Reset for next 1000 batches
+                                            self.user_batch_count[user_id] = 0
+                                            self.user_latency_history[user_id] = []
+                                            self.user_raw_data[user_id] = []
+                        
                         asyncio.run_coroutine_threadsafe(
                             self.conn_manager.put_frames_to_output_queue(
                                 user_id,
@@ -315,6 +474,119 @@ class App:
             print("[App] Shutdown event triggered, cleaning up...")
             await self.cleanup()
 
+    def _log_metrics_to_file(self, user_id: uuid.UUID):
+        """Log metrics to file after collecting 1000 batches"""
+        try:
+            import json
+            import numpy as np
+            
+            # Get latency history
+            if user_id not in self.user_latency_history or len(self.user_latency_history[user_id]) == 0:
+                print(f"[Metrics] No latency data to log for user {user_id}")
+                return
+            
+            latencies = np.array(self.user_latency_history[user_id])
+            
+            # Calculate statistics
+            stats = {
+                "mean_latency": float(np.mean(latencies)),
+                "median_latency": float(np.median(latencies)),
+                "p50_latency": float(np.percentile(latencies, 50)),
+                "p90_latency": float(np.percentile(latencies, 90)),
+                "p95_latency": float(np.percentile(latencies, 95)),
+                "p99_latency": float(np.percentile(latencies, 99)),
+                "p99_9_latency": float(np.percentile(latencies, 99.9)),
+                "min_latency": float(np.min(latencies)),
+                "max_latency": float(np.max(latencies)),
+                "std_latency": float(np.std(latencies)),
+                "sample_count": len(latencies)
+            }
+            
+            # Calculate deadline miss rate using target latency
+            deadline = self.target_latency
+            missed = np.sum(latencies > deadline)
+            deadline_stats = {
+                "deadline_seconds": deadline,
+                "deadline_miss_rate": float(missed / len(latencies)) if len(latencies) > 0 else 0.0,
+                "missed_frames": int(missed),
+                "total_frames": len(latencies)
+            }
+            
+            # Calculate jitter (variation in consecutive latencies)
+            if len(latencies) > 1:
+                jitter = np.abs(np.diff(latencies))
+                jitter_stats = {
+                    "mean_jitter": float(np.mean(jitter)),
+                    "std_jitter": float(np.std(jitter)),
+                    "max_jitter": float(np.max(jitter)),
+                    "min_jitter": float(np.min(jitter)),
+                    "p50_jitter": float(np.percentile(jitter, 50)),
+                    "p90_jitter": float(np.percentile(jitter, 90)),
+                    "p95_jitter": float(np.percentile(jitter, 95)),
+                    "p99_jitter": float(np.percentile(jitter, 99)),
+                    "p99.9_jitter": float(np.percentile(jitter, 99.9)),
+                    "jitter_variance": float(np.var(jitter))
+                }
+            else:
+                jitter_stats = {}
+            
+            # Create timestamp folder (YYYYMMDD_HHMM_step{step}_gpu{gpu_ids} format)
+            timestamp = time.strftime("%Y%m%d_%H%M")
+            # Format GPU IDs: replace commas with underscores for folder naming
+            gpu_str = self.gpu_ids.replace(",", "_")
+            folder_name = f"{timestamp}_step{self.step}_gpu{gpu_str}"
+            session_dir = os.path.join(self.metrics_log_dir, folder_name)
+            os.makedirs(session_dir, exist_ok=True)
+            
+            # Prepare raw data file content
+            raw_data_content = {
+                "user_id": str(user_id),
+                "timestamp": timestamp,
+                "target_latency": self.target_latency,
+                "batches": self.user_raw_data.get(user_id, [])
+            }
+            
+            # Prepare statistics file content
+            statistics_content = {
+                "user_id": str(user_id),
+                "timestamp": timestamp,
+                "target_latency": self.target_latency,
+                "batch_count": 1000,
+                "total_frames": len(latencies),
+                "latency_stats": stats,
+                "deadline_miss_rate": deadline_stats,
+                "jitter_distribution": jitter_stats,
+                "tail_latency": {
+                    "p90_latency": stats["p90_latency"],
+                    "p95_latency": stats["p95_latency"],
+                    "p99_latency": stats["p99_latency"],
+                    "p99_9_latency": stats["p99_9_latency"],
+                    "max_latency": stats["max_latency"],
+                    "mean_latency": stats["mean_latency"],
+                    "median_latency": stats["median_latency"]
+                }
+            }
+            
+            # Write raw data file
+            raw_data_filename = os.path.join(session_dir, f"raw_data_{user_id}.json")
+            with open(raw_data_filename, 'w') as f:
+                json.dump(raw_data_content, f, indent=2)
+            
+            # Write statistics file
+            statistics_filename = os.path.join(session_dir, f"statistics_{user_id}.json")
+            with open(statistics_filename, 'w') as f:
+                json.dump(statistics_content, f, indent=2)
+            
+            print(f"[Metrics] Logged metrics to {session_dir}/")
+            print(f"[Metrics]   - Raw data: raw_data_{user_id}.json")
+            print(f"[Metrics]   - Statistics: statistics_{user_id}.json")
+            print(f"[Metrics] Summary: mean={stats['mean_latency']:.4f}s, "
+                  f"p95={stats['p95_latency']:.4f}s, "
+                  f"miss_rate={deadline_stats['deadline_miss_rate']*100:.2f}%")
+            
+        except Exception as e:
+            logging.error(f"Error logging metrics to file: {e}")
+    
     async def cleanup(self):
         """Clean up all resources on shutdown"""
         print("[App] Starting cleanup process...")

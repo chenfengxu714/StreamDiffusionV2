@@ -62,9 +62,9 @@ def load_mp4_as_tensor(
 
     return video  # [C, T, H, W]
 
-def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: int, chunck_size: int, noise_scale: float, init_noise_scale: float):
+def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: int, chunk_size: int, noise_scale: float, init_noise_scale: float):
     """Compute adaptive noise scale and current step based on video content."""
-    l2_dist=(input_video_original[:,:,end_idx-chunck_size:end_idx]-input_video_original[:,:,end_idx-chunck_size-1:end_idx-1])**2
+    l2_dist=(input_video_original[:,:,end_idx-chunk_size:end_idx]-input_video_original[:,:,end_idx-chunk_size-1:end_idx-1])**2
     l2_dist = (torch.sqrt(l2_dist.mean(dim=(0,1,3,4))).max()/0.2).clamp(0,1)
     new_noise_scale = (init_noise_scale-0.1*l2_dist.item())*0.9+noise_scale*0.1
     current_step = int(1000*new_noise_scale)-100
@@ -157,7 +157,7 @@ class SingleGPUInferencePipeline:
         return denoised_pred
     
     def run_inference(self, input_video_original: torch.Tensor, prompts: list, 
-                     num_chuncks: int, chunck_size: int, noise_scale: float, 
+                     num_chunks: int, chunk_size: int, noise_scale: float, 
                      output_folder: str, fps: int, num_steps: int):
         """
         Run the complete single GPU inference pipeline.
@@ -214,18 +214,18 @@ class SingleGPUInferencePipeline:
         init_noise_scale = noise_scale
         
         # Process remaining chunks
-        while self.processed < num_chuncks + num_steps - 1:
+        while self.processed < num_chunks + num_steps - 1:
             # Update indices
             start_idx = end_idx
-            end_idx = end_idx + chunck_size
+            end_idx = end_idx + chunk_size
             current_start = current_end
-            current_end = current_end + (chunck_size // 4) * self.pipeline.frame_seq_length
+            current_end = current_end + (chunk_size // 4) * self.pipeline.frame_seq_length
 
             if input_video_original is not None and end_idx <= input_video_original.shape[2]:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
                 noise_scale, current_step = compute_noise_scale_and_step(
-                    input_video_original, end_idx, chunck_size, noise_scale, init_noise_scale
+                    input_video_original, end_idx, chunk_size, noise_scale, init_noise_scale
                 )
                 
                 # VAE encoding
@@ -240,7 +240,7 @@ class SingleGPUInferencePipeline:
 
             # if current_start//self.pipeline.frame_seq_length >= 50:
             #     current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
-            #     current_end = current_start + (chunck_size // 4) * self.pipeline.frame_seq_length
+            #     current_end = current_start + (chunk_size // 4) * self.pipeline.frame_seq_length
             
             torch.cuda.synchronize()
             dit_start_time = time.time()
@@ -255,7 +255,7 @@ class SingleGPUInferencePipeline:
 
             if self.processed >3:
                 torch.cuda.synchronize()
-                dit_fps_list.append(chunck_size/(time.time()-dit_start_time))
+                dit_fps_list.append(chunk_size/(time.time()-dit_start_time))
             
             self.processed += 1
             
@@ -272,13 +272,13 @@ class SingleGPUInferencePipeline:
                 torch.cuda.synchronize()
                 end_time = time.time()
                 t = end_time - start_time
-                fps_test = chunck_size/t
+                fps_test = chunk_size/t
                 fps_list.append(fps_test)
                 self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, FPS: {fps_test:.4f}")
                 start_time = end_time
         
         # Save final video
-        video_list = [results[i] for i in range(num_chuncks)]
+        video_list = [results[i] for i in range(num_chunks)]
         video = np.concatenate(video_list, axis=0)
         fps_avg = np.mean(np.array(fps_list))
         self.logger.info(f"DiT Average FPS: {np.mean(np.array(dit_fps_list)):.4f}")
@@ -343,8 +343,8 @@ def main():
         t = args.num_frames
     
     # Calculate number of chunks
-    chunck_size = 4 * config.num_frame_per_block
-    num_chuncks = (t - 1) // chunck_size
+    chunk_size = 4 * config.num_frame_per_block
+    num_chunks = (t - 1) // chunk_size
     
     # Initialize pipeline manager
     pipeline_manager = SingleGPUInferencePipeline(config, device)
@@ -358,7 +358,7 @@ def main():
     # Run inference
     try:
         pipeline_manager.run_inference(
-            input_video_original, prompts, num_chuncks, chunck_size, 
+            input_video_original, prompts, num_chunks, chunk_size, 
             args.noise_scale, args.output_folder, args.fps, num_steps
         )
     except Exception as e:

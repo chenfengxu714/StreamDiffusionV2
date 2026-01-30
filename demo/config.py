@@ -20,6 +20,8 @@ class Args(NamedTuple):
     max_outstanding: int
     schedule_block: bool
     model_type: str
+    enable_metrics: bool
+    target_latency: float
 
     def pretty_print(self):
         print("\n")
@@ -73,5 +75,9 @@ parser.add_argument("--gpu_ids", type=str, default="0,1") # id separated by comm
 parser.add_argument("--max_outstanding", type=int, default=2, help="max number of outstanding sends/recv to keep")
 parser.add_argument("--schedule_block", action="store_true", default=False)
 parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
+
+# Metrics collection
+parser.add_argument("--enable-metrics", dest="enable_metrics", action="store_true", default=False, help="Enable SLO metrics collection")
+parser.add_argument("--target-latency", dest="target_latency", type=float, default=1.0, help="Target latency in seconds for deadline miss rate calculation (default: 0.5s)")
 
 config = Args(**vars(parser.parse_args()))
