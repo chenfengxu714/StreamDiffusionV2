@@ -1,4 +1,4 @@
-# StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation
+# StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation (MLSys 2026)
 
 [Tianrui Feng](https://jerryfeng2003.github.io/)<sup>*,1</sup>, [Zhi Li](https://scholar.google.com/citations?user=C6kPjgwAAAAJ&hl)<sup>1</sup>, [Shuo Yang](https://andy-yang-1.github.io/)<sup>1</sup>, [Haocheng Xi](https://haochengxi.github.io/)<sup>1</sup>, [Muyang Li](https://lmxyy.me/)<sup>2</sup>, [Xiuyu Li](https://xiuyuli.com/)<sup>1</sup>, [Lvmin Zhang](https://lllyasviel.github.io/lvmin_zhang/)<sup>3</sup>, [Keting Yang](https://www.linkedin.com/in/kellyzpeng/)<sup>4</sup>, [Kelly Peng](https://www.linkedin.com/in/kellyzpeng/)<sup>5</sup>, [Song Han](https://hanlab.mit.edu/songhan)<sup>2</sup>, [Maneesh Agrawala](https://graphics.stanford.edu/~maneesh/)<sup>3</sup>, [Kurt Keutzer](https://people.eecs.berkeley.edu/~keutzer/)<sup>1</sup>, [Akio Kodaira](https://scholar.google.com/citations?hl=ja&user=15X3cioAAAAJ)<sup>1</sup>, [Chenfeng Xu](https://www.chenfengx.com/)<sup>†,1,6</sup>
 
