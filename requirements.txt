@@ -106,7 +106,6 @@ nvidia-cusparselt-cu12==0.6.2
 nvidia-nccl-cu12==2.21.5
 nvidia-nvjitlink-cu12==12.4.127
 nvidia-nvtx-cu12==12.4.127
-nvidia-pyindex==1.0.9
 nvidia-tensorrt==99.0.0
 omegaconf==2.3.0
 onnx==1.18.0
