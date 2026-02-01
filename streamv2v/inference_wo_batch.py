@@ -143,12 +143,13 @@ class SingleGPUInferencePipeline:
         save_results = 0
 
         fps_list = []
+        dit_fps_list = []
         
         # Initialize variables
         start_idx = 0
-        end_idx = 5
+        end_idx = 1 + chunk_size
         current_start = 0
-        current_end = self.pipeline.frame_seq_length * 2
+        current_end = self.pipeline.frame_seq_length * (1+chunk_size//4)
         init_noise_scale = noise_scale
         
         torch.cuda.synchronize()
@@ -159,7 +160,7 @@ class SingleGPUInferencePipeline:
             inp = input_video_original[:, :, start_idx:end_idx]
             
             # VAE encoding
-            latents = self.pipeline.vae.model.stream_encode(inp)
+            latents = self.pipeline.vae.stream_encode(inp)
             latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
             
             noise = torch.randn_like(latents)
@@ -197,7 +198,7 @@ class SingleGPUInferencePipeline:
                 )
                 
                 # VAE encoding
-                latents = self.pipeline.vae.model.stream_encode(inp)
+                latents = self.pipeline.vae.stream_encode(inp)
                 latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
                 
                 noise = torch.randn_like(latents)
@@ -207,6 +208,8 @@ class SingleGPUInferencePipeline:
                 current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
                 current_end = current_start + (chunk_size // 4) * self.pipeline.frame_seq_length
                 
+            torch.cuda.synchronize()
+            dit_start_time = time.time()
             # DiT inference - using input mode to process all 30 blocks
             denoised_pred = self.pipeline.inference_wo_batch(
                 noise=noisy_latents,
@@ -238,6 +241,7 @@ class SingleGPUInferencePipeline:
         video_list = [results[i] for i in range(num_chunks)]
         video = np.concatenate(video_list, axis=0)
         fps_avg = np.mean(np.array(fps_list))
+        self.logger.info(f"DiT Average FPS: {np.mean(np.array(dit_fps_list)):.4f}")
         self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
         
         output_path = os.path.join(output_folder, f"output_{0:03d}.mp4")
@@ -260,6 +264,7 @@ def main():
     parser.add_argument("--width", type=int, default=832, help="Video width")
     parser.add_argument("--fps", type=int, default=16, help="Output video fps")
     parser.add_argument("--step", type=int, default=2, help="Step")
+    parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     args = parser.parse_args()
     
     torch.set_grad_enabled(False)

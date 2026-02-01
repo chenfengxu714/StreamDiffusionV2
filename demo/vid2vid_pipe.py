@@ -81,6 +81,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
     chunk_size = 4 * args.num_frame_per_block
     first_batch_num_frames = 1 + chunk_size
     is_running = False
+    input_batch = 0
     prompt = prompt_dict["prompt"]
 
     torch.cuda.memory._record_memory_history(max_entries=100000)
@@ -113,7 +114,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             outstanding = []
 
         if not is_running:
-            images = read_images_from_queue(input_queue, first_batch_num_frames, device, stop_event, prefer_latest=True)
+            images = read_images_from_queue(input_queue, first_batch_num_frames, device, stop_event, dynamic_batch=False)
             if images is None:
                 return
             pipeline_manager.logger.info(f"Initializing rank {rank} first batch")
@@ -132,27 +133,31 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             current_start = pipeline_manager.pipeline.kv_cache_length - pipeline_manager.pipeline.frame_seq_length
             current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
 
-        images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
-        if images is None:
-            break
 
         if args.schedule_block:
             torch.cuda.synchronize()
             start_vae = time.time()
 
-        noise_scale, current_step = compute_noise_scale_and_step(
-            input_video_original=torch.cat([last_image, images], dim=2),
-            end_idx=first_batch_num_frames,
-            chunk_size=chunk_size,
-            noise_scale=float(noise_scale),
-            init_noise_scale=float(init_noise_scale),
-        )
+        if input_batch == 0:
+            images = read_images_from_queue(input_queue, chunk_size, device, stop_event, dynamic_batch=True)
+            num_frames = images.shape[2]
+            input_batch = num_frames // chunk_size
 
-        latents = pipeline_manager.pipeline.vae.stream_encode(images, is_scale=False)  # [B, 4, T, H//16, W//16] or so
-        latents = latents.transpose(2,1).contiguous().to(dtype=torch.bfloat16)
-        noise = torch.randn_like(latents)
-        noisy_latents = noise * noise_scale + latents * (1-noise_scale)
+            noise_scale, current_step = compute_noise_scale_and_step(
+                input_video_original=torch.cat([last_image, images], dim=2),
+                end_idx=first_batch_num_frames,
+                chunk_size=chunk_size,
+                noise_scale=float(noise_scale),
+                init_noise_scale=float(init_noise_scale),
+            )
 
+            latents = pipeline_manager.pipeline.vae.stream_encode(images, is_scale=False)  # [B, 4, T, H//16, W//16] or so
+            latents = latents.transpose(2,1).contiguous().to(dtype=torch.bfloat16)
+            noise = torch.randn_like(latents)
+            noisy_latents = noise * noise_scale + latents * (1-noise_scale)
+
+        if images is None:
+            break
         # Measure DiT time if scheduling is enabled
         if args.schedule_block:
             torch.cuda.synchronize()
@@ -165,13 +170,14 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             pipeline_manager.pipeline.kv_cache_ends.copy_(latent_data.current_end)
 
         denoised_pred, patched_x_shape = pipeline_manager.pipeline.inference(
-            noise=noisy_latents, # [1, 4, 16, 16, 60]
+            noise=noisy_latents[:, -input_batch].unsqueeze(1), # [1, 4, 16, 16, 60]
             current_start=current_start,
             current_end=current_end,
             current_step=current_step,
             block_mode='input',
             block_num=block_num[rank],
         )
+        input_batch-=1
         # pipeline_manager.logger.info(f"[Rank {rank}] Inference done for chunk {chunk_idx}")
 
         # Update DiT timing

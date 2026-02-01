@@ -43,15 +43,17 @@ def is_firefox(user_agent: str) -> bool:
     return "Firefox" in user_agent
 
 
-def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, prefer_latest=False):
+def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, dynamic_batch=False):
     # Wait until we have enough frames
     while queue.qsize() < num_frames_needed:
         if stop_event and stop_event.is_set():
             return None
         time.sleep(0.05)
-    # print(f"Reading {num_frames_needed} frames from queue of size {queue.qsize()}")
 
     # Read exactly num_frames_needed frames in order (FIFO), don't discard any frames
+    if dynamic_batch:
+        num_frames_needed = queue.qsize()//num_frames_needed * num_frames_needed
+    # print(f"Reading {num_frames_needed} frames from queue of size {queue.qsize()}")
     images = []
     for _ in range(num_frames_needed):
         images.append(queue.get())

@@ -175,9 +175,9 @@ class SingleGPUInferencePipeline:
         
         # Initialize variables
         start_idx = 0
-        end_idx = 5
+        end_idx = 1 + chunk_size
         current_start = 0
-        current_end = self.pipeline.frame_seq_length * 2
+        current_end = self.pipeline.frame_seq_length * (1+chunk_size//4)
         
         torch.cuda.synchronize()
         start_time = time.time()

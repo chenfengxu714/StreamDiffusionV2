@@ -150,6 +150,7 @@ def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event
     chunk_size = 4 * args.num_frame_per_block
     first_batch_num_frames = 1 + chunk_size
     is_running = False
+    input_batch = 0
     prompt = prompt_dict["prompt"]
 
     prepare_event.set()
@@ -161,7 +162,7 @@ def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event
             if restart_event.is_set():
                 clear_queue(input_queue)
                 restart_event.clear()
-            images = read_images_from_queue(input_queue, first_batch_num_frames, device, stop_event, prefer_latest=True)
+            images = read_images_from_queue(input_queue, first_batch_num_frames, device, stop_event, dynamic_batch=False)
 
             noise_scale = args.noise_scale
             init_noise_scale = args.noise_scale
@@ -179,7 +180,7 @@ def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event
 
             # Prepare pipeline
             current_start = 0
-            current_start = pipeline_manager.pipeline.frame_seq_length * (1 + chunk_size//4)
+            current_end = pipeline_manager.pipeline.frame_seq_length * (1 + chunk_size//4)
             if pipeline_manager.pipeline.kv_cache1 is not None:
                 pipeline_manager.pipeline.reset_kv_cache()
                 pipeline_manager.pipeline.reset_crossattn_cache()
@@ -206,27 +207,31 @@ def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event
             current_start = pipeline_manager.pipeline.kv_cache_length - pipeline_manager.pipeline.frame_seq_length
             current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
 
-        images = read_images_from_queue(input_queue, chunk_size, device, stop_event)
+        if input_batch == 0:
+            images = read_images_from_queue(input_queue, chunk_size, device, stop_event, dynamic_batch=True)
+            num_frames = images.shape[2]
+            input_batch = num_frames // chunk_size
+        
+            noise_scale, current_step = compute_noise_scale_and_step(
+                input_video_original=torch.cat([last_image, images], dim=2),
+                end_idx=num_frames +1,
+                chunk_size=num_frames ,
+                noise_scale=float(noise_scale),
+                init_noise_scale=float(init_noise_scale),
+            )
 
-        noise_scale, current_step = compute_noise_scale_and_step(
-            input_video_original=torch.cat([last_image, images], dim=2),
-            end_idx=first_batch_num_frames,
-            chunk_size=chunk_size,
-            noise_scale=float(noise_scale),
-            init_noise_scale=float(init_noise_scale),
-        )
-
-        latents = pipeline_manager.pipeline.vae.stream_encode(images, is_scale=False)
-        latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
-        noise = torch.randn_like(latents)
-        noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
-
+            latents = pipeline_manager.pipeline.vae.stream_encode(images, is_scale=False)
+            latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
+            noise = torch.randn_like(latents)
+            noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
+        
         denoised_pred = pipeline_manager.pipeline.inference_stream(
-            noise=noisy_latents,
+            noise=noisy_latents[:, -input_batch].unsqueeze(1),
             current_start=current_start,
             current_end=current_end,
             current_step=current_step,
         )
+        input_batch-=1
 
         processed += 1
         
