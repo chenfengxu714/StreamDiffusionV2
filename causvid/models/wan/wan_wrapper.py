@@ -36,7 +36,7 @@ class WanTextEncoder(TextEncoderInterface):
         )
 
         self.tokenizer = HuggingfaceTokenizer(
-            name=os.path.join(repo_root, "wan_models/Wan2.1-T2V-1.3B/google/umt5-xxl/"), seq_len=512, clean='whitespace')
+            name=os.path.join(repo_root, f"wan_models/Wan2.1-{model_type}/google/umt5-xxl/"), seq_len=512, clean='whitespace')
 
     @property
     def device(self):
