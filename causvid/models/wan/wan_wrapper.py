@@ -113,7 +113,7 @@ class WanVAEWrapper(VAEInterface):
         # output = output.permute(0, 2, 1, 3, 4)
         return output
     
-    def stream_encode(self, video: torch.Tensor, is_scale=True) -> torch.Tensor:
+    def stream_encode(self, video: torch.Tensor, is_scale=False) -> torch.Tensor:
         if is_scale:
             device, dtype = video.device, video.dtype
             scale = [self.mean.to(device=device, dtype=dtype),
