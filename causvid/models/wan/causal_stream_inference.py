@@ -36,7 +36,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.height = args.height//scale_size*2
         self.width = args.width//scale_size*2
         self.frame_seq_length = (args.height//scale_size) * (args.width//scale_size)
-        self.kv_cache_length = self.frame_seq_length*args.num_kv_cache
+        self.num_kv_cache = args.num_kv_cache
+        self.kv_cache_length = self.frame_seq_length*self.num_kv_cache
         self.num_sink_tokens = args.num_sink_tokens
         self.adapt_sink_threshold = args.adapt_sink_threshold
 

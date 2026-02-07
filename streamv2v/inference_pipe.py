@@ -134,6 +134,9 @@ class InferencePipelineManager:
         self.t_total = 100.0
         self.processed = 0
         self.schedule_step = (self.world_size + len(config.denoising_step_list)) * 2
+        self.processed_offset = 3
+        self.base_chunk_size = 4
+        self.t_refresh = 50
         
         self.logger.info(f"Initialized InferencePipelineManager for rank {rank}")
     
@@ -176,7 +179,7 @@ class InferencePipelineManager:
         start_idx = 0
         end_idx = 1 + chunk_size
         current_start = 0
-        current_end = self.pipeline.frame_seq_length * (1+chunk_size//4)
+        current_end = self.pipeline.frame_seq_length * (1+chunk_size//self.base_chunk_size)
         init_noise_scale = noise_scale
         
         outstanding = []
@@ -189,7 +192,7 @@ class InferencePipelineManager:
             start_idx = end_idx
             end_idx = end_idx + chunk_size
             current_start = current_end
-            current_end = current_end + (chunk_size // 4) * self.pipeline.frame_seq_length
+            current_end = current_end + (chunk_size // self.base_chunk_size) * self.pipeline.frame_seq_length
 
             if schedule_block:
                 torch.cuda.synchronize()
@@ -208,9 +211,9 @@ class InferencePipelineManager:
                 noise = torch.randn_like(latents)
                 noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
 
-            if current_start//self.pipeline.frame_seq_length >= 50:
-                current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
-                current_end = current_start + (chunk_size // 4) * self.pipeline.frame_seq_length
+            # if current_start//self.pipeline.frame_seq_length >= self.t_refresh:
+            #     current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
+            #     current_end = current_start + (chunk_size // self.base_chunk_size) * self.pipeline.frame_seq_length
             
             # Measure DiT time if scheduling is enabled
             if schedule_block:
@@ -296,7 +299,7 @@ class InferencePipelineManager:
             
             start_time = end_time
 
-            if self.processed + 3 >= num_chunks + num_steps * self.world_size + self.world_size - self.rank - 1:
+            if self.processed + self.processed_offset >= num_chunks + num_steps * self.world_size + self.world_size - self.rank - 1:
                 break
         
         self.logger.info("Rank 0 inference loop completed")
@@ -528,7 +531,7 @@ class InferencePipelineManager:
 
             start_time = end_time
 
-            if self.processed + 3 >= num_chunks + num_steps * self.world_size + self.world_size - self.rank - 1:
+            if self.processed + self.processed_offset >= num_chunks + num_steps * self.world_size + self.world_size - self.rank - 1:
                 break
         
         self.logger.info(f"DiT Average FPS: {np.mean(fps_list):.4f}")

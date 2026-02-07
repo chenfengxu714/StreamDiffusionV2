@@ -147,7 +147,8 @@ def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event
     pipeline_manager = SingleGPUInferencePipeline(args, device)
     pipeline_manager.load_model(args.checkpoint_folder)
     num_steps = len(pipeline_manager.pipeline.denoising_step_list)
-    chunk_size = 4 * args.num_frame_per_block
+    base_chunk_size = pipeline_manager.base_chunk_size
+    chunk_size = base_chunk_size * args.num_frame_per_block
     first_batch_num_frames = 1 + chunk_size
     is_running = False
     input_batch = 0
@@ -198,14 +199,14 @@ def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event
                 output_queue.put(image)
 
             current_start = current_end
-            current_end += (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+            current_end += (chunk_size // base_chunk_size) * pipeline_manager.pipeline.frame_seq_length
             last_image = images[:,:,[-1]]
             processed = 0
             is_running = True
 
-        if current_start//pipeline_manager.pipeline.frame_seq_length >= 50:
+        if current_start//pipeline_manager.pipeline.frame_seq_length >= pipeline_manager.t_refresh:
             current_start = pipeline_manager.pipeline.kv_cache_length - pipeline_manager.pipeline.frame_seq_length
-            current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+            current_end = current_start + (chunk_size // base_chunk_size) * pipeline_manager.pipeline.frame_seq_length
 
         if input_batch == 0:
             images = read_images_from_queue(input_queue, chunk_size, device, stop_event, dynamic_batch=True)
@@ -245,5 +246,5 @@ def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event
                 output_queue.put(image)
 
         current_start = current_end
-        current_end += (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+        current_end += (chunk_size // base_chunk_size) * pipeline_manager.pipeline.frame_seq_length
         last_image = images[:,:,[-1]]

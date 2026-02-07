@@ -78,7 +78,8 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
 
     pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
     num_steps = len(pipeline_manager.pipeline.denoising_step_list)
-    chunk_size = 4 * args.num_frame_per_block
+    base_chunk_size = pipeline_manager.base_chunk_size
+    chunk_size = base_chunk_size * args.num_frame_per_block
     first_batch_num_frames = 1 + chunk_size
     is_running = False
     input_batch = 0
@@ -123,15 +124,15 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
             chunk_idx = 0
             noise_scale = args.noise_scale
             init_noise_scale = args.noise_scale
-            current_start = pipeline_manager.pipeline.frame_seq_length * (1 + chunk_size//4)
-            current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+            current_start = pipeline_manager.pipeline.frame_seq_length * (1 + chunk_size//base_chunk_size)
+            current_end = current_start + (chunk_size // base_chunk_size) * pipeline_manager.pipeline.frame_seq_length
             last_image = images[:,:,[-1]]
             outstanding = []
             pipeline_manager.logger.info(f"Starting rank {rank} inference loop")
         
-        if current_start//pipeline_manager.pipeline.frame_seq_length >= 50:
+        if current_start//pipeline_manager.pipeline.frame_seq_length >= pipeline_manager.t_refresh:
             current_start = pipeline_manager.pipeline.kv_cache_length - pipeline_manager.pipeline.frame_seq_length
-            current_end = current_start + (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+            current_end = current_start + (chunk_size // base_chunk_size) * pipeline_manager.pipeline.frame_seq_length
 
 
         if args.schedule_block:
@@ -240,7 +241,7 @@ def input_process(rank, block_num, args, prompt_dict, prepare_event, restart_eve
         last_image = images[:,:,[-1]]
         chunk_idx += 1
         current_start = current_end
-        current_end += (chunk_size // 4) * pipeline_manager.pipeline.frame_seq_length
+        current_end += (chunk_size // base_chunk_size) * pipeline_manager.pipeline.frame_seq_length
         is_running = True
 
 def output_process(rank, block_num, args, prompt_dict, prepare_event, stop_event, output_queue):

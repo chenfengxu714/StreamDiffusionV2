@@ -103,6 +103,9 @@ class SingleGPUInferencePipeline:
         self.t_dit = 100.0
         self.t_total = 100.0
         self.processed = 0
+        self.processed_offset = 3
+        self.base_chunk_size = 4
+        self.t_refresh = 50
         
         self.logger.info("Single GPU inference pipeline manager initialized")
     
@@ -217,6 +220,10 @@ class SingleGPUInferencePipeline:
                 current_end=current_end,
                 current_step=current_step,
             )
+            
+            if self.processed >self.processed_offset:
+                torch.cuda.synchronize()
+                dit_fps_list.append(chunk_size/(time.time()-dit_start_time))
             
             self.processed += 1
             

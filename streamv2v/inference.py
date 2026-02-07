@@ -109,6 +109,9 @@ class SingleGPUInferencePipeline:
         self.t_dit = 100.0
         self.t_total = 100.0
         self.processed = 0
+        self.processed_offset = 3
+        self.base_chunk_size = 4
+        self.t_refresh = 50
 
         
         self.logger.info("Single GPU inference pipeline manager initialized")
@@ -156,9 +159,18 @@ class SingleGPUInferencePipeline:
         )
         return denoised_pred
     
-    def run_inference(self, input_video_original: torch.Tensor, prompts: list, 
-                     num_chunks: int, chunk_size: int, noise_scale: float, 
-                     output_folder: str, fps: int, num_steps: int):
+    def run_inference(
+        self, 
+        input_video_original: torch.Tensor, 
+        prompts: list, 
+        num_chunks: int, 
+        chunk_size: int, 
+        noise_scale: float, 
+        output_folder: str, 
+        fps: int, 
+        target_fps:int,  
+        num_steps: int,
+        ):
         """
         Run the complete single GPU inference pipeline.
         
@@ -238,7 +250,7 @@ class SingleGPUInferencePipeline:
                 noisy_latents = torch.randn(1,self.pipeline.num_frame_per_block,16,self.pipeline.height,self.pipeline.width, device=self.device, dtype=torch.bfloat16)
                 current_step = None # Use default steps
 
-            # if current_start//self.pipeline.frame_seq_length >= 50:
+            # if current_start//self.pipeline.frame_seq_length >= self.t_refresh:
             #     current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
             #     current_end = current_start + (chunk_size // 4) * self.pipeline.frame_seq_length
             
@@ -253,7 +265,7 @@ class SingleGPUInferencePipeline:
                 current_step=current_step,
             )
 
-            if self.processed >3:
+            if self.processed > self.processed_offset:
                 torch.cuda.synchronize()
                 dit_fps_list.append(chunk_size/(time.time()-dit_start_time))
             
@@ -275,6 +287,14 @@ class SingleGPUInferencePipeline:
                 fps_test = chunk_size/t
                 fps_list.append(fps_test)
                 self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, FPS: {fps_test:.4f}")
+
+                if self.processed==num_steps+self.processed_offset and target_fps is not None and fps_test<target_fps:
+                    max_chunk_size = (self.pipeline.num_kv_cache - self.pipeline.num_sink_tokens - 1) * self.base_chunk_size
+                    num_chunks=(num_chunks-self.processed-num_steps+1)//(max_chunk_size//chunk_size)+self.processed-num_steps+1
+                    self.pipeline.hidden_states=self.pipeline.hidden_states.repeat(1,max_chunk_size//chunk_size,1,1,1)
+                    chunk_size = max_chunk_size
+                    self.logger.info(f"Adjust chunk size to {chunk_size}")
+
                 start_time = end_time
         
         # Save final video
@@ -307,6 +327,7 @@ def main():
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     parser.add_argument("--num_frames", type=int, default=81, help="Video length (number of frames)")
     parser.add_argument("--fixed_noise_scale", action="store_true", default=False)
+    parser.add_argument("--target_fps", type=int, required=False, default=None, help="Video length (number of frames)")
     args = parser.parse_args()
     
     torch.set_grad_enabled(False)
@@ -359,7 +380,7 @@ def main():
     try:
         pipeline_manager.run_inference(
             input_video_original, prompts, num_chunks, chunk_size, 
-            args.noise_scale, args.output_folder, args.fps, num_steps
+            args.noise_scale, args.output_folder, args.fps, args.target_fps, num_steps
         )
     except Exception as e:
         print(f"Error occurred during inference: {e}")
