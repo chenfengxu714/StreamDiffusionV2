@@ -1,12 +1,10 @@
 # StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation (MLSys 2026)
 
-[Tianrui Feng](https://jerryfeng2003.github.io/)<sup>*,1</sup>, [Zhi Li](https://scholar.google.com/citations?user=C6kPjgwAAAAJ&hl)<sup>1</sup>, [Shuo Yang](https://andy-yang-1.github.io/)<sup>1</sup>, [Haocheng Xi](https://haochengxi.github.io/)<sup>1</sup>, [Muyang Li](https://lmxyy.me/)<sup>2</sup>, [Xiuyu Li](https://xiuyuli.com/)<sup>1</sup>, [Lvmin Zhang](https://lllyasviel.github.io/lvmin_zhang/)<sup>3</sup>, [Keting Yang](https://www.linkedin.com/in/kellyzpeng/)<sup>4</sup>, [Kelly Peng](https://www.linkedin.com/in/kellyzpeng/)<sup>5</sup>, [Song Han](https://hanlab.mit.edu/songhan)<sup>2</sup>, [Maneesh Agrawala](https://graphics.stanford.edu/~maneesh/)<sup>3</sup>, [Kurt Keutzer](https://people.eecs.berkeley.edu/~keutzer/)<sup>1</sup>, [Akio Kodaira](https://scholar.google.com/citations?hl=ja&user=15X3cioAAAAJ)<sup>1</sup>, [Chenfeng Xu](https://www.chenfengx.com/)<sup>†,1,6</sup>
+[Tianrui Feng](https://jerryfeng2003.github.io/)<sup>1</sup>, [Zhi Li](https://scholar.google.com/citations?user=C6kPjgwAAAAJ&hl)<sup>2</sup>, [Shuo Yang](https://andy-yang-1.github.io/)<sup>2</sup>, [Haocheng Xi](https://haochengxi.github.io/)<sup>2</sup>, [Muyang Li](https://lmxyy.me/)<sup>3</sup>, [Xiuyu Li](https://xiuyuli.com/)<sup>1</sup>, [Lvmin Zhang](https://lllyasviel.github.io/lvmin_zhang/)<sup>4</sup>, [Keting Yang](https://www.linkedin.com/in/kellyzpeng/)<sup>5</sup>, [Kelly Peng](https://www.linkedin.com/in/kellyzpeng/)<sup>6</sup>, [Song Han](https://hanlab.mit.edu/songhan)<sup>7</sup>, [Maneesh Agrawala](https://graphics.stanford.edu/~maneesh/)<sup>4</sup>, [Kurt Keutzer](https://people.eecs.berkeley.edu/~keutzer/)<sup>2</sup>, [Akio Kodaira](https://scholar.google.com/citations?hl=ja&user=15X3cioAAAAJ)<sup>8</sup>, [Chenfeng Xu](https://www.chenfengx.com/)<sup>†,1</sup>
 
-<sup>1</sup>UC Berkeley   <sup>2</sup>MIT   <sup>3</sup>Stanford University  <sup>4</sup>Independent Researcher  <sup>5</sup>First Intelligence   <sup>6</sup>UT Austin 
+<sup>1</sup>UT Austin, <sup>2</sup>UC Berkeley, <sup>3</sup>Nunchaku AI, <sup>4</sup>Stanford University, <sup>5</sup>Independent Researcher, <sup>6</sup>First Intelligence, <sup>7</sup>MIT, <sup>8</sup>Shizhuku AI
 
-<sup>†</sup> Project lead, corresponding to [xuchenfeng@berkeley.edu](mailto:xuchenfeng@berkeley.edu)
-
-<sup>*</sup> Work done when Tianrui Feng was a visiting student at UC Berkeley advised by Chenfeng Xu.
+<sup>†</sup> Project lead, corresponding to [xuchenfeng@utexas.edu](mailto:xuchenfeng@utexas.edu)
 
 [![Project](https://img.shields.io/badge/Homepage-project-orange.svg?logo=googlehome)](https://streamdiffusionv2.github.io/) [![arXiv](https://img.shields.io/badge/Arxiv-2511.07399-b31b1b.svg?logo=arXiv)](https://arxiv.org/abs/2511.07399) [![Hugging Face](https://img.shields.io/badge/HuggingFace-Space-blue.svg?logo=huggingface)](https://huggingface.co/jerryfeng/StreamDiffusionV2)
 
