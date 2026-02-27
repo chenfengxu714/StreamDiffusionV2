@@ -319,7 +319,7 @@ def main():
     parser.add_argument("--output_folder", type=str, required=True, help="Output folder path")
     parser.add_argument("--prompt_file_path", type=str, required=True, help="Prompt file path")
     parser.add_argument("--video_path", type=str, required=False, default=None, help="Input video path")
-    parser.add_argument("--noise_scale", type=float, default=0.700, help="Noise scale")
+    parser.add_argument("--noise_scale", type=float, default=0.8, help="Noise scale")
     parser.add_argument("--height", type=int, default=480, help="Video height")
     parser.add_argument("--width", type=int, default=832, help="Video width")
     parser.add_argument("--fps", type=int, default=16, help="Output video fps")
