@@ -78,6 +78,7 @@ class CausalWanSelfAttention(nn.Module):
         
         self.sink_size = 3
         self.adapt_sink_thr = -1
+        self.evict_idx = None
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -146,7 +147,18 @@ class CausalWanSelfAttention(nn.Module):
                 k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
 
             seq_lens = []
+            kv_cache_size = kv_cache["k"].shape[1]
+            cache_bs = kv_cache['k'].shape[0]
+            
+            # Ring-buffer queue init
+            if self.evict_idx is None:
+                self.evict_idx = [[]]
+
+            if len(self.evict_idx) < cache_bs:
+                self.evict_idx = [self.evict_idx[0].copy() for _ in range(cache_bs)]
+                
             for i, c_start in enumerate(current_start):
+                num_new_tokens = roped_query.shape[1]
                 current_end = c_start + roped_query.shape[1]
                 sink_tokens = self.sink_size * frame_seqlen
                 
@@ -167,31 +179,29 @@ class CausalWanSelfAttention(nn.Module):
                         sink_tokens = idx * frame_seqlen
 
                 # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
-                kv_cache_size = kv_cache["k"].shape[1]
-                num_new_tokens = roped_query.shape[1]
                 if c_start + num_new_tokens >= kv_cache_size:
                     kv_cache["global_end_index"][i].fill_(c_start)
                     kv_cache["local_end_index"][i].fill_(kv_cache_size)
+
                 if (current_end > kv_cache["global_end_index"][i].item()) and (
                         num_new_tokens + kv_cache["local_end_index"][i].item() > kv_cache_size):
-                    # Calculate the number of new tokens added in this step
-                    # Shift existing cache content left to discard oldest tokens
-                    # Clone the source slice to avoid overlapping memory error
-                    num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"][i].item() - kv_cache_size
-                    num_rolled_tokens = kv_cache["local_end_index"][i].item() - num_evicted_tokens - sink_tokens
-                    kv_cache["k"][i:i+1, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                        kv_cache["k"][i:i+1, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                    kv_cache["v"][i:i+1, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                        kv_cache["v"][i:i+1, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                    # Insert the new keys/values at the end
-                    local_end_index = kv_cache["local_end_index"][i].item() + current_end - \
-                        kv_cache["global_end_index"][i].item() - num_evicted_tokens
+                    # Update the buffer
+                    self.evict_idx[i].append(self.evict_idx[i].pop(0))
+
+                    # Newly added cache covers the oldest one
+                    kv_cache["k"][i:i+1, self.evict_idx[i][0]-frame_seqlen:self.evict_idx[i][0]] = roped_key[i:i+1]
+                    kv_cache["v"][i:i+1, self.evict_idx[i][0]-frame_seqlen:self.evict_idx[i][0]] = v[i:i+1]
+
+                    local_end_index = kv_cache["local_end_index"][i].item()
+
                 else:
                     local_end_index = kv_cache["local_end_index"][i].item() + current_end - kv_cache["global_end_index"][i].item()
+                    if current_end > self.sink_size * frame_seqlen:
+                        self.evict_idx[i].append(current_end)
 
-                local_start_index = local_end_index - num_new_tokens
-                kv_cache["k"][i:i+1, local_start_index:local_end_index] = roped_key[i:i+1]
-                kv_cache["v"][i:i+1, local_start_index:local_end_index] = v[i:i+1]
+                    local_start_index = local_end_index - num_new_tokens
+                    kv_cache["k"][i:i+1, local_start_index:local_end_index] = roped_key[i:i+1]
+                    kv_cache["v"][i:i+1, local_start_index:local_end_index] = v[i:i+1]
 
                 seq_lens.append(local_end_index)
 
