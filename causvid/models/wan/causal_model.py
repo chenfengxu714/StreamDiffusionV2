@@ -185,19 +185,31 @@ class CausalWanSelfAttention(nn.Module):
 
                 if (current_end > kv_cache["global_end_index"][i].item()) and (
                         num_new_tokens + kv_cache["local_end_index"][i].item() > kv_cache_size):
+
+                    target_end = self.evict_idx[i][0]
+
+                    # current_step = kv_cache['current_step']
                     # Update the buffer
-                    self.evict_idx[i].append(self.evict_idx[i].pop(0))
+                    if cache_bs==1 and kv_cache['current_step'] > 1:
+                        kv_cache['current_step']-=1
+                    else:
+                        self.evict_idx[i].append(self.evict_idx[i].pop(0))
+                        kv_cache['current_step']=kv_cache['total_steps']
+
+                    # print(f"self.evict_idx: {self.evict_idx[i]}, total steps: {kv_cache['total_steps']}, current step: {current_step}, target: {target_end-num_new_tokens}:{target_end}")
 
                     # Newly added cache covers the oldest one
-                    kv_cache["k"][i:i+1, self.evict_idx[i][0]-frame_seqlen:self.evict_idx[i][0]] = roped_key[i:i+1]
-                    kv_cache["v"][i:i+1, self.evict_idx[i][0]-frame_seqlen:self.evict_idx[i][0]] = v[i:i+1]
+                    kv_cache["k"][i:i+1, target_end-num_new_tokens:target_end] = roped_key[i:i+1]
+                    kv_cache["v"][i:i+1, target_end-num_new_tokens:target_end] = v[i:i+1]
 
                     local_end_index = kv_cache["local_end_index"][i].item()
 
                 else:
                     local_end_index = kv_cache["local_end_index"][i].item() + current_end - kv_cache["global_end_index"][i].item()
-                    if current_end > self.sink_size * frame_seqlen:
-                        self.evict_idx[i].append(current_end)
+
+                    rolling_end = current_end + num_new_tokens
+                    if rolling_end > self.sink_size * frame_seqlen and (not self.evict_idx[i] or self.evict_idx[i][-1] != rolling_end):
+                        self.evict_idx[i].append(rolling_end.item())
 
                     local_start_index = local_end_index - num_new_tokens
                     kv_cache["k"][i:i+1, local_start_index:local_end_index] = roped_key[i:i+1]

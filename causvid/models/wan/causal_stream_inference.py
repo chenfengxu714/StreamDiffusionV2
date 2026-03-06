@@ -85,6 +85,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 "v": torch.zeros([batch_size, cache_length, self.num_heads, 128], dtype=dtype, device=device),
                 "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
                 "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                "total_steps": len(self.denoising_step_list),
+                "current_step": len(self.denoising_step_list),
             })
 
         self.kv_cache1 = kv_cache1  # always store the clean cache
