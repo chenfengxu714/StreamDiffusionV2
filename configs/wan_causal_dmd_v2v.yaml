@@ -14,6 +14,8 @@ fake_score_grad:
 denoising_step_list:
 - 700
 - 500
+- 400
+- 200
 - 0
 num_train_timestep: 1000
 timestep_shift: 8.0

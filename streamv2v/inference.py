@@ -9,6 +9,7 @@ inference pipeline on a single GPU:
 """
 
 from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
+from causvid.util import set_seed
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
 from omegaconf import OmegaConf
@@ -113,6 +114,8 @@ class SingleGPUInferencePipeline:
         self.base_chunk_size = 4
         self.t_refresh = 50
 
+        self.t2v = config.t2v
+
         
         self.logger.info("Single GPU inference pipeline manager initialized")
     
@@ -144,8 +147,7 @@ class SingleGPUInferencePipeline:
             self.logger.warning(f"Strict load_state_dict failed: {e}; retrying with strict=False")
             self.pipeline.generator.load_state_dict(state_dict, strict=False)
     
-    def prepare_pipeline(self, text_prompts: list, noise: torch.Tensor, 
-                        current_start: int, current_end: int):
+    def prepare_pipeline(self, text_prompts: list, noise: torch.Tensor, current_start: int, current_end: int):
         """Prepare the pipeline for inference."""
         # Use the original prepare method which now handles distributed environment gracefully
         denoised_pred = self.pipeline.prepare(
@@ -187,15 +189,18 @@ class SingleGPUInferencePipeline:
         
         # Initialize variables
         start_idx = 0
-        end_idx = 1 + chunk_size
+        if self.t2v:
+            end_idx = 1 + chunk_size - 4
+        else:
+            end_idx = 1 + chunk_size
         current_start = 0
-        current_end = self.pipeline.frame_seq_length * (1+chunk_size//4)
+        current_end = self.pipeline.frame_seq_length * (1+(end_idx-1)//4)
         
         torch.cuda.synchronize()
         start_time = time.time()
         
         # Process first chunk (initialization)
-        if input_video_original is not None:
+        if not self.t2v:
             inp = input_video_original[:, :, start_idx:end_idx]
             
             # VAE encoding
@@ -205,7 +210,7 @@ class SingleGPUInferencePipeline:
             noise = torch.randn_like(latents)
             noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
         else:
-            noisy_latents = torch.randn(1,1+self.pipeline.num_frame_per_block,16,self.pipeline.height,self.pipeline.width, device=self.device, dtype=torch.bfloat16)
+            noisy_latents = torch.randn(1,self.pipeline.num_frame_per_block,16,self.pipeline.height,self.pipeline.width, device=self.device, dtype=torch.bfloat16)
         
             
         # Prepare pipeline
@@ -221,10 +226,11 @@ class SingleGPUInferencePipeline:
         video = (video * 0.5 + 0.5).clamp(0, 1)
         video = video[0].permute(0, 2, 3, 1).contiguous()
         results[save_results] = video.cpu().float().numpy()
+        print(f"start:{current_start}, end: {current_end}, start_idx: {start_idx}, save_results: {save_results}, T: {video.shape[0]}")
         save_results += 1
         
         init_noise_scale = noise_scale
-        
+
         # Process remaining chunks
         while self.processed < num_chunks + num_steps - 1:
             # Update indices
@@ -233,7 +239,7 @@ class SingleGPUInferencePipeline:
             current_start = current_end
             current_end = current_end + (chunk_size // 4) * self.pipeline.frame_seq_length
 
-            if input_video_original is not None and end_idx <= input_video_original.shape[2]:
+            if not self.t2v and end_idx <= input_video_original.shape[2]:
                 inp = input_video_original[:, :, start_idx:end_idx]
                 
                 noise_scale, current_step = compute_noise_scale_and_step(
@@ -250,13 +256,10 @@ class SingleGPUInferencePipeline:
                 noisy_latents = torch.randn(1,self.pipeline.num_frame_per_block,16,self.pipeline.height,self.pipeline.width, device=self.device, dtype=torch.bfloat16)
                 current_step = None # Use default steps
 
-            # if current_start//self.pipeline.frame_seq_length >= self.t_refresh:
-            #     current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
-            #     current_end = current_start + (chunk_size // 4) * self.pipeline.frame_seq_length
-            
             torch.cuda.synchronize()
             dit_start_time = time.time()
                 
+            print(f"start:{current_start}, end: {current_end}, start_idx: {start_idx}, self.processed: {self.processed}")
             # DiT inference - using input mode to process all 30 blocks
             denoised_pred = self.pipeline.inference_stream(
                 noise=noisy_latents,
@@ -273,10 +276,12 @@ class SingleGPUInferencePipeline:
             
             # VAE decoding - only start decoding after num_steps
             if self.processed >= num_steps:
+                if self.t2v and self.processed == num_steps:
+                    continue
                 video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred[[-1]])
                 video = (video * 0.5 + 0.5).clamp(0, 1)
                 video = video[0].permute(0, 2, 3, 1).contiguous()
-                
+                print(f"save_results: {save_results}, T: {video.shape[0]}")
                 results[save_results] = video.cpu().float().numpy()
                 save_results += 1
             
@@ -297,6 +302,7 @@ class SingleGPUInferencePipeline:
 
                 start_time = end_time
         
+
         # Save final video
         video_list = [results[i] for i in range(num_chunks)]
         video = np.concatenate(video_list, axis=0)
@@ -324,9 +330,11 @@ def main():
     parser.add_argument("--width", type=int, default=832, help="Video width")
     parser.add_argument("--fps", type=int, default=16, help="Output video fps")
     parser.add_argument("--step", type=int, default=2, help="Step")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     parser.add_argument("--num_frames", type=int, default=81, help="Video length (number of frames)")
     parser.add_argument("--fixed_noise_scale", action="store_true", default=False)
+    parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--target_fps", type=int, required=False, default=None, help="Video length (number of frames)")
     args = parser.parse_args()
     
@@ -340,20 +348,17 @@ def main():
     config = OmegaConf.merge(config, OmegaConf.create(vars(args)))
     # Derive denoising_step_list from step if provided
     # Always base on the canonical full list to ensure --step overrides YAML
-    full_denoising_list = [700, 600, 500, 400, 0]
+    full_denoising_list = config.denoising_step_list
     step_value = int(args.step)
-    # Preserve historical mappings for 1..4
-    if step_value <= 1:
-        config.denoising_step_list = [700, 0]
-    elif step_value == 2:
-        config.denoising_step_list = [700, 500, 0]
-    elif step_value == 3:
-        config.denoising_step_list = [700, 600, 400, 0]
-    else:
-        config.denoising_step_list = full_denoising_list
+    config.denoising_step_list = full_denoising_list[:step_value]
+    config.denoising_step_list.append(0)
+
+    set_seed(args.seed)
+
+    print(f"Denoising Step List: {config.denoising_step_list}")
     
     # Load input video
-    if args.video_path is not None:
+    if not args.t2v:
         input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
         print(f"Input video tensor shape: {input_video_original.shape}")
         b, c, t, h, w = input_video_original.shape
@@ -366,7 +371,9 @@ def main():
     # Calculate number of chunks
     chunk_size = 4 * config.num_frame_per_block
     num_chunks = (t - 1) // chunk_size
-    
+
+    if args.t2v:
+        num_chunks+=1
     # Initialize pipeline manager
     pipeline_manager = SingleGPUInferencePipeline(config, device)
     pipeline_manager.load_model(args.checkpoint_folder)
@@ -379,8 +386,15 @@ def main():
     # Run inference
     try:
         pipeline_manager.run_inference(
-            input_video_original, prompts, num_chunks, chunk_size, 
-            args.noise_scale, args.output_folder, args.fps, args.target_fps, num_steps
+            input_video_original, 
+            prompts, 
+            num_chunks, 
+            chunk_size, 
+            args.noise_scale, 
+            args.output_folder, 
+            args.fps, 
+            args.target_fps, 
+            num_steps,
         )
     except Exception as e:
         print(f"Error occurred during inference: {e}")

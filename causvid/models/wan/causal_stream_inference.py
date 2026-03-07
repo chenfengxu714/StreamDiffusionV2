@@ -61,8 +61,9 @@ class CausalStreamInferencePipeline(torch.nn.Module):
         self.denoising_step_list = torch.tensor(
             args.denoising_step_list, dtype=torch.long, device=device)
         assert self.denoising_step_list[-1] == 0
-        # remove the last timestep (which equals zero)
-        self.denoising_step_list = self.denoising_step_list[:-1]
+        if not args.t2v:
+            # remove the last timestep (which equals zero)
+            self.denoising_step_list = self.denoising_step_list[:-1]
 
         self.scheduler = self.generator.get_scheduler()
         if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time shift
@@ -209,8 +210,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.kv_cache1[i]['global_end_index'] = self.kv_cache1[i]['global_end_index'].repeat(self.batch_size)
             self.kv_cache1[i]['local_end_index'] = self.kv_cache1[i]['local_end_index'].repeat(self.batch_size)
 
-            self.crossattn_cache[i]['k'] = self.crossattn_cache[i]['k'].repeat(self.batch_size, 1, 1, 1)
-            self.crossattn_cache[i]['v'] = self.crossattn_cache[i]['v'].repeat(self.batch_size, 1, 1, 1)
+            self.crossattn_cache[i]['k'] = self.crossattn_cache[i]['k'].expand(self.batch_size, -1, -1, -1)
+            self.crossattn_cache[i]['v'] = self.crossattn_cache[i]['v'].expand(self.batch_size, -1, -1, -1)
         
         # Remove blocks outside the range
         if block_num is not None:
@@ -239,7 +240,13 @@ class CausalStreamInferencePipeline(torch.nn.Module):
     
         return denoised_pred
     
-    def inference_stream(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
+    def inference_stream(
+        self, 
+        noise: torch.Tensor, 
+        current_start: int, 
+        current_end: int, 
+        current_step: int,
+        ) -> torch.Tensor:
 
         self.hidden_states[1:] = self.hidden_states[:-1].clone()
         self.hidden_states[0] = noise[0]
@@ -274,7 +281,14 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         return self.hidden_states
     
-    def inference_wo_batch(self, noise: torch.Tensor, current_start: int, current_end: int, current_step: int) -> torch.Tensor:
+    def inference_wo_batch(
+        self, 
+        noise: torch.Tensor, 
+        current_start: int, 
+        current_end: int, 
+        current_step: int,
+        ) -> torch.Tensor:
+
         batch_size = noise.shape[0]
 
         current_start = torch.ones(batch_size, dtype=torch.long, device=self.device) * current_start
@@ -319,9 +333,17 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
         return denoised_pred
 
-    def inference(self, noise: torch.Tensor, current_start: int, current_end: int, \
-        current_step: int, block_mode: str='input', block_num=None,\
-            patched_x_shape: torch.Tensor=None, block_x: torch.Tensor=None) -> torch.Tensor:
+    def inference(
+        self, 
+        noise: torch.Tensor, 
+        current_start: int, 
+        current_end: int, 
+        current_step: int, 
+        block_mode: str='input', 
+        block_num=None,
+        patched_x_shape: torch.Tensor=None, 
+        block_x: torch.Tensor=None,
+        ) -> torch.Tensor:
 
         if block_mode == 'input':
             self.hidden_states[1:] = self.hidden_states[:-1].clone()

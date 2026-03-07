@@ -1,6 +1,6 @@
 model_name: wan
 generator_name: causal_wan
-generator_ckpt: "wan_causal_ode_checkpoint_model_003000/model.pt"
+generator_ckpt: "ckpts/autoregressive_checkpoint/model.pt"
 generator_fsdp_wrap_strategy: size
 real_score_fsdp_wrap_strategy: size
 fake_score_fsdp_wrap_strategy: size
@@ -19,7 +19,7 @@ denoising_step_list:
 - 0
 num_train_timestep: 1000
 timestep_shift: 8.0
-real_guidance_scale: 2.0
+real_guidance_scale: 3.5
 generator_task: causal_video
 real_task_type: bidirectional_video
 fake_task_type: bidirectional_video
@@ -46,9 +46,12 @@ image_or_video_shape:
 - 16
 - 60
 - 104
-output_path: /mnt/localssd/wan_causal_dmd_warp_4step
+output_path: /mnt/localssd/wan_causal_dmd
 distillation_loss: dmd
 gradient_checkpointing: true
 backward_simulation: false
 num_frame_per_block: 3
-warp_denoising_step: true
+num_kv_cache: 21
+num_sink_tokens: 0
+adapt_sink_threshold: -1
+warp_denoising_step: false

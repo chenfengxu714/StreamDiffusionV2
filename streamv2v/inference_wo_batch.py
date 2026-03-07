@@ -285,16 +285,12 @@ def main():
         config[k] = v
     # Derive denoising_step_list from step if provided
     # Always base on the canonical full list to ensure --step overrides YAML
-    full_denoising_list = [700, 600, 500, 400, 0]
-    step_value = args.step
-    if step_value <= 1:
-        config.denoising_step_list = [700, 0]
-    elif step_value == 2:
-        config.denoising_step_list = [700, 500, 0]
-    elif step_value == 3:
-        config.denoising_step_list = [700, 600, 400, 0]
-    else:
-        config.denoising_step_list = full_denoising_list
+    full_denoising_list = config.denoising_step_list
+    step_value = int(args.step)
+    config.denoising_step_list = full_denoising_list[:step_value]
+    config.denoising_step_list.append(0)
+
+    print(f"Denoising Step List: {config.denoising_step_list}")
     
     # Load input video
     input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
