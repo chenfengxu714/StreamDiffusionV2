@@ -605,6 +605,7 @@ def main():
     parser.add_argument("--ring_size", type=int, default=1)
     parser.add_argument("--step", type=int, default=2)
     parser.add_argument("--schedule_block", action="store_true", default=False)
+    parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     
     args = parser.parse_args()

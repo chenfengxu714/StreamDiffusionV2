@@ -259,7 +259,6 @@ class SingleGPUInferencePipeline:
             torch.cuda.synchronize()
             dit_start_time = time.time()
                 
-            print(f"start:{current_start}, end: {current_end}, start_idx: {start_idx}, self.processed: {self.processed}")
             # DiT inference - using input mode to process all 30 blocks
             denoised_pred = self.pipeline.inference_stream(
                 noise=noisy_latents,
@@ -281,7 +280,6 @@ class SingleGPUInferencePipeline:
                 video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred[[-1]])
                 video = (video * 0.5 + 0.5).clamp(0, 1)
                 video = video[0].permute(0, 2, 3, 1).contiguous()
-                print(f"save_results: {save_results}, T: {video.shape[0]}")
                 results[save_results] = video.cpu().float().numpy()
                 save_results += 1
             

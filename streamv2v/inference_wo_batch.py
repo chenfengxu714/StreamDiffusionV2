@@ -271,6 +271,7 @@ def main():
     parser.add_argument("--width", type=int, default=832, help="Video width")
     parser.add_argument("--fps", type=int, default=16, help="Output video fps")
     parser.add_argument("--step", type=int, default=2, help="Step")
+    parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     args = parser.parse_args()
     

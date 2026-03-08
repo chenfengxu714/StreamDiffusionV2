@@ -79,6 +79,7 @@ class CausalWanSelfAttention(nn.Module):
         self.sink_size = 3
         self.adapt_sink_thr = -1
         self.evict_idx = None
+        self.temp_evict = False
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -162,7 +163,7 @@ class CausalWanSelfAttention(nn.Module):
                 current_end = c_start + roped_query.shape[1]
                 sink_tokens = self.sink_size * frame_seqlen
                 
-                if sink_tokens > 0 and self.adapt_sink_thr > -1 and v.shape[1] <= frame_seqlen:
+                if not self.temp_evict and sink_tokens > 0 and self.adapt_sink_thr > -1 and v.shape[1] <= frame_seqlen:
                     # Caculate similarity between new keys/values and the oldest ones in the cache
                     k_sink_mean = kv_cache["k"][i:i+1, :sink_tokens].reshape(self.sink_size, frame_seqlen, -1).mean(1)
                     k_new_mean = roped_key[i:i+1].reshape(1, frame_seqlen, -1).mean(1)
@@ -170,13 +171,15 @@ class CausalWanSelfAttention(nn.Module):
 
                     v_sink_mean = kv_cache["v"][i:i+1, :sink_tokens].reshape(self.sink_size, frame_seqlen, -1).mean(1)
                     v_new_mean = v[i:i+1].reshape(1, frame_seqlen, -1).mean(1)
-                    v_cos_sim = torch.cosine_similarity(v_sink_mean, v_new_mean, dim=-1).mean()
+                    v_cos_sim = torch.cosine_similarity(v_sink_mean, v_new_mean, dim=-1)
 
                     avg_cos_sim = (k_cos_sim + v_cos_sim)/2
                     # When the similarity is low, refresh the sink
                     if avg_cos_sim.min() < self.adapt_sink_thr:
                         idx = torch.argmin(avg_cos_sim)
-                        sink_tokens = idx * frame_seqlen
+                        temp_evict_idx = (idx+1) * frame_seqlen
+                        self.evict_idx[i].insert(0, temp_evict_idx)
+                        self.temp_evict = True
 
                 # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
                 if c_start + num_new_tokens >= kv_cache_size:
@@ -193,7 +196,11 @@ class CausalWanSelfAttention(nn.Module):
                     if cache_bs==1 and kv_cache['current_step'] > 1:
                         kv_cache['current_step']-=1
                     else:
-                        self.evict_idx[i].append(self.evict_idx[i].pop(0))
+                        evict_idx = self.evict_idx[i].pop(0)
+                        if not self.temp_evict:
+                            self.evict_idx[i].append(evict_idx)
+                        else:
+                            self.temp_evict = False
                         kv_cache['current_step']=kv_cache['total_steps']
 
                     # print(f"self.evict_idx: {self.evict_idx[i]}, total steps: {kv_cache['total_steps']}, current step: {current_step}, target: {target_end-num_new_tokens}:{target_end}")
