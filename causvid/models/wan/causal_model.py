@@ -79,7 +79,6 @@ class CausalWanSelfAttention(nn.Module):
         self.sink_size = 3
         self.adapt_sink_thr = -1
         self.evict_idx = None
-        self.temp_evict = False
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -163,7 +162,7 @@ class CausalWanSelfAttention(nn.Module):
                 current_end = c_start + roped_query.shape[1]
                 sink_tokens = self.sink_size * frame_seqlen
                 
-                if not self.temp_evict and sink_tokens > 0 and self.adapt_sink_thr > -1 and v.shape[1] <= frame_seqlen:
+                if sink_tokens > 0 and self.adapt_sink_thr > -1 and v.shape[1] <= frame_seqlen:
                     # Caculate similarity between new keys/values and the oldest ones in the cache
                     k_sink_mean = kv_cache["k"][i:i+1, :sink_tokens].reshape(self.sink_size, frame_seqlen, -1).mean(1)
                     k_new_mean = roped_key[i:i+1].reshape(1, frame_seqlen, -1).mean(1)
@@ -176,13 +175,12 @@ class CausalWanSelfAttention(nn.Module):
                     avg_cos_sim = (k_cos_sim + v_cos_sim)/2
                     # When the similarity is low, refresh the sink
                     if avg_cos_sim.min() < self.adapt_sink_thr:
-                        idx = torch.argmin(avg_cos_sim)
+                        idx = torch.argmin(avg_cos_sim).item()
                         temp_evict_idx = (idx+1) * frame_seqlen
                         self.evict_idx[i].insert(0, temp_evict_idx)
-                        self.temp_evict = True
 
                 # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
-                if c_start + num_new_tokens >= kv_cache_size:
+                if current_end > kv_cache_size:
                     kv_cache["global_end_index"][i].fill_(c_start)
                     kv_cache["local_end_index"][i].fill_(kv_cache_size)
 
@@ -197,13 +195,11 @@ class CausalWanSelfAttention(nn.Module):
                         kv_cache['current_step']-=1
                     else:
                         evict_idx = self.evict_idx[i].pop(0)
-                        if not self.temp_evict:
+                        if evict_idx > sink_tokens:
                             self.evict_idx[i].append(evict_idx)
-                        else:
-                            self.temp_evict = False
                         kv_cache['current_step']=kv_cache['total_steps']
 
-                    # print(f"self.evict_idx: {self.evict_idx[i]}, total steps: {kv_cache['total_steps']}, current step: {current_step}, target: {target_end-num_new_tokens}:{target_end}")
+                    # print(f"self.evict_idx: {self.evict_idx[i]}, total steps: {kv_cache['total_steps']}, current step: {current_step}, target: {target_end-num_new_tokens}:{target_end}, kv size:{kv_cache_size}")
 
                     # Newly added cache covers the oldest one
                     kv_cache["k"][i:i+1, target_end-num_new_tokens:target_end] = roped_key[i:i+1]
@@ -214,11 +210,13 @@ class CausalWanSelfAttention(nn.Module):
                 else:
                     local_end_index = kv_cache["local_end_index"][i].item() + current_end - kv_cache["global_end_index"][i].item()
 
-                    rolling_end = current_end + num_new_tokens
-                    if rolling_end > self.sink_size * frame_seqlen and (not self.evict_idx[i] or self.evict_idx[i][-1] != rolling_end):
-                        self.evict_idx[i].append(rolling_end.item())
+                    rolling_end = (current_end + num_new_tokens).item()
+                    if rolling_end > self.sink_size * frame_seqlen and rolling_end <= kv_cache_size \
+                        and (not self.evict_idx[i] or self.evict_idx[i][-1] != rolling_end):
+                        self.evict_idx[i].append(rolling_end)
 
                     local_start_index = local_end_index - num_new_tokens
+                    # print(f"target: {local_start_index}:{local_end_index}")
                     kv_cache["k"][i:i+1, local_start_index:local_end_index] = roped_key[i:i+1]
                     kv_cache["v"][i:i+1, local_start_index:local_end_index] = v[i:i+1]
 

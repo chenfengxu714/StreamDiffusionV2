@@ -6,6 +6,7 @@ communication abstraction layers for better code organization and maintainabilit
 """
 
 from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
+from causvid.util import set_seed
 from streamv2v.inference import compute_noise_scale_and_step
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
@@ -604,6 +605,7 @@ def main():
     parser.add_argument("--ulysses_size", type=int, default=1)
     parser.add_argument("--ring_size", type=int, default=1)
     parser.add_argument("--step", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--schedule_block", action="store_true", default=False)
     parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
@@ -633,6 +635,8 @@ def main():
     config.denoising_step_list.append(0)
 
     print(f"Denoising Step List: {config.denoising_step_list}")
+    
+    set_seed(args.seed)
     
     # Load input video
     input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)

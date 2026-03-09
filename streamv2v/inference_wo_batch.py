@@ -9,6 +9,7 @@ inference pipeline on a single GPU:
 """
 
 from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
+from causvid.util import set_seed
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
 from omegaconf import OmegaConf
@@ -271,6 +272,7 @@ def main():
     parser.add_argument("--width", type=int, default=832, help="Video width")
     parser.add_argument("--fps", type=int, default=16, help="Output video fps")
     parser.add_argument("--step", type=int, default=2, help="Step")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     args = parser.parse_args()
@@ -292,6 +294,8 @@ def main():
     config.denoising_step_list.append(0)
 
     print(f"Denoising Step List: {config.denoising_step_list}")
+
+    set_seed(args.seed)
     
     # Load input video
     input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
