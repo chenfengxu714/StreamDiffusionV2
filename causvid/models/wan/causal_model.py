@@ -13,11 +13,19 @@ from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from torch.nn.attention.flex_attention import BlockMask
 from diffusers.models.modeling_utils import ModelMixin
+import torch.nn.functional as F
 import torch.nn as nn
 import torch
 import math
-from flash_attn import flash_attn_interface
 import torch.distributed as dist
+import warnings
+
+try:
+    from flash_attn import flash_attn_interface
+    FLASH_ATTN_AVAILABLE = True
+except ModuleNotFoundError:
+    flash_attn_interface = None
+    FLASH_ATTN_AVAILABLE = False
 
 # wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
 # see https://github.com/pytorch/pytorch/issues/133254
@@ -57,6 +65,55 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
         # append to collection
         output.append(x_i)
     return torch.stack(output).type_as(x)
+
+
+def attention_with_kvcache_fallback(q, k_cache, v_cache, cache_seqlens):
+    out_dtype = q.dtype
+    max_seq_len = k_cache.shape[1]
+
+    def prepare_inputs(q_tensor, k_tensor, v_tensor):
+        if q_tensor.device.type == "cpu" and q_tensor.dtype in (torch.float16, torch.bfloat16):
+            q_tensor = q_tensor.float()
+            k_tensor = k_tensor.float()
+            v_tensor = v_tensor.float()
+        return q_tensor, k_tensor, v_tensor
+
+    # Fast path: every sample uses the same fully valid cache span.
+    if torch.all(cache_seqlens == max_seq_len):
+        q_all = q.transpose(1, 2)
+        k_all = k_cache.transpose(1, 2)
+        v_all = v_cache.transpose(1, 2)
+        q_all, k_all, v_all = prepare_inputs(q_all, k_all, v_all)
+        x = F.scaled_dot_product_attention(
+            q_all,
+            k_all,
+            v_all,
+            attn_mask=None,
+            dropout_p=0.0,
+            # Keep parity with flash_attn_with_kvcache(..., causal=False).
+            is_causal=False,
+        )
+        return x.transpose(1, 2).to(out_dtype).contiguous()
+
+    outputs = []
+    for batch_idx, seq_len in enumerate(cache_seqlens.tolist()):
+        q_i = q[batch_idx:batch_idx + 1].transpose(1, 2)
+        k_i = k_cache[batch_idx:batch_idx + 1, :seq_len].transpose(1, 2)
+        v_i = v_cache[batch_idx:batch_idx + 1, :seq_len].transpose(1, 2)
+        q_i, k_i, v_i = prepare_inputs(q_i, k_i, v_i)
+
+        x_i = F.scaled_dot_product_attention(
+            q_i,
+            k_i,
+            v_i,
+            attn_mask=None,
+            dropout_p=0.0,
+            # Keep parity with flash_attn_with_kvcache(..., causal=False).
+            is_causal=False,
+        )
+        outputs.append(x_i.transpose(1, 2).to(out_dtype))
+
+    return torch.cat(outputs, dim=0).contiguous()
 
 
 class CausalWanSelfAttention(nn.Module):
@@ -227,12 +284,29 @@ class CausalWanSelfAttention(nn.Module):
             
             seq_lens = torch.tensor(seq_lens, dtype=torch.int32, device=roped_query.device)
 
-            x = flash_attn_interface.flash_attn_with_kvcache(
-                q=roped_query,
-                k_cache=kv_cache["k"][:, :seq_lens.max()],
-                v_cache=kv_cache["v"][:, :seq_lens.max()],
-                cache_seqlens=seq_lens,
-            )
+            max_seq_len = int(seq_lens.max().item())
+            k_cache = kv_cache["k"][:, :max_seq_len]
+            v_cache = kv_cache["v"][:, :max_seq_len]
+
+            if FLASH_ATTN_AVAILABLE:
+                x = flash_attn_interface.flash_attn_with_kvcache(
+                    q=roped_query,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    cache_seqlens=seq_lens,
+                )
+            else:
+                warnings.warn(
+                    "flash_attn is not installed; falling back to "
+                    "scaled_dot_product_attention for KV-cache attention.",
+                    stacklevel=2,
+                )
+                x = attention_with_kvcache_fallback(
+                    q=roped_query,
+                    k_cache=k_cache,
+                    v_cache=v_cache,
+                    cache_seqlens=seq_lens,
+                )
 
         # output
         x = x.flatten(2)
