@@ -36,7 +36,7 @@ conda create -n stream python=3.10.0
 conda activate stream
 # Require CUDA 12.4 or above, please check via `nvcc -V`
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt 
+pip install -r requirements.txt
 python setup.py develop
 ```
 
@@ -62,7 +62,7 @@ python streamv2v/inference.py \
 --config_path configs/wan_causal_dmd_v2v.yaml \
 --checkpoint_folder ckpts/wan_causal_dmd_v2v \
 --output_folder outputs/ \
---prompt_file_path examples/original.mp4 \
+--prompt_file_path examples/prompt.txt \
 --video_path examples/original.mp4 \
 --height 480 \
 --width 832 \
@@ -78,7 +78,7 @@ torchrun --nproc_per_node=2 --master_port=29501 streamv2v/inference_pipe.py \
 --config_path configs/wan_causal_dmd_v2v.yaml \
 --checkpoint_folder ckpts/wan_causal_dmd_v2v \
 --output_folder outputs/ \
---prompt_file_path examples/original.mp4 \
+--prompt_file_path examples/prompt.txt \
 --video_path examples/original.mp4 \
 --height 480 \
 --width 832 \
