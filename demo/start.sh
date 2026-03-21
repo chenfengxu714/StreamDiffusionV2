@@ -1,11 +1,30 @@
 #!/bin/bash
-cd frontend
+set -eu
+
+# Build the Svelte frontend, then launch the Python demo backend.
+# Override HOST, PORT, GPU_IDS, STEP, and MODEL_TYPE via environment variables.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+FRONTEND_DIR="$SCRIPT_DIR/frontend"
+
+PORT="${PORT:-7860}"
+HOST="${HOST:-0.0.0.0}"
+GPU_IDS="${GPU_IDS:-0}"
+STEP="${STEP:-1}"
+MODEL_TYPE="${MODEL_TYPE:-T2V-1.3B}"
+
+IFS=',' read -r -a GPU_ARRAY <<< "$GPU_IDS"
+LOCAL_GPU_IDS="$(seq 0 $((${#GPU_ARRAY[@]} - 1)) | paste -sd, -)"
+
+cd "$FRONTEND_DIR"
 npm install
 npm run build
-if [ $? -eq 0 ]; then
-    echo -e "\033[1;32m\nfrontend build success \033[0m"
-else
-    echo -e "\033[1;31m\nfrontend build failed\n\033[0m" >&2  exit 1
-fi
-cd ../
-CUDA_VISIBLE_DEVICES=0 python main.py --port 7860 --host 0.0.0.0 --num_gpus 1 --step 1 --model_type T2V-1.3B --enable-metrics
+echo "frontend build success"
+
+cd "$SCRIPT_DIR"
+CUDA_VISIBLE_DEVICES="$GPU_IDS" python main.py \
+  --port "$PORT" \
+  --host "$HOST" \
+  --num_gpus "$(printf '%s' "$GPU_IDS" | awk -F',' '{print NF}')" \
+  --gpu_ids "$LOCAL_GPU_IDS" \
+  --step "$STEP" \
+  --model_type "$MODEL_TYPE"

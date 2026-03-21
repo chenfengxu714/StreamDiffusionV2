@@ -37,6 +37,9 @@ conda activate stream
 # Require CUDA 12.4 or above, please check via `nvcc -V`
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
+# Optional but recommended for better throughput
+# The project will fall back to PyTorch attention if FlashAttention is unavailable
+pip install flash_attn==2.7.4.post1 --no-build-isolation
 python setup.py develop
 ```
 
@@ -55,10 +58,54 @@ We use the 14B model from [CausVid-Plus](https://github.com/GoatWu/CausVid-Plus)
 
 ## Offline Inference
 
-### Single GPU
+All offline inference entrypoints are unified under `run_v2v.sh`.
+
+Choose one mode first:
+
+- `single`: single-GPU streaming inference
+- `single-wo`: single-GPU inference without Stream-batch
+- `pipe`: multi-GPU pipeline inference
+
+Quick start:
 
 ```shell
-python streamv2v/inference.py \
+./run_v2v.sh single
+./run_v2v.sh single-wo
+./run_v2v.sh pipe
+./run_v2v.sh pipe --profile
+```
+
+Use `--profile` only when you want synchronized throughput measurements.
+
+The legacy wrappers `v2v.sh`, `v2v_wo.sh`, and `pipe_v2v.sh` still work, but they now forward to the same shared entrypoint.
+
+### Common Arguments
+
+The most important options are:
+
+- `--config_path`: model config YAML
+- `--checkpoint_folder`: checkpoint directory
+- `--video_path`: input video
+- `--prompt_file_path`: prompt text file
+- `--output_folder`: output directory
+- `--height` and `--width`: output resolution
+- `--fps`: target output FPS
+- `--step`: number of denoising steps used during inference
+
+You can pass overrides either as CLI flags or as environment variables. For example:
+
+```shell
+OUTPUT_FOLDER=outputs/run_single ./run_v2v.sh single
+VIDEO_PATH=examples/original.mp4 PROMPT_FILE_PATH=examples/prompt.txt ./run_v2v.sh single-wo
+NPROC_PER_NODE=2 MASTER_PORT=29511 ./run_v2v.sh pipe
+```
+
+### Single GPU
+
+This is the standard offline path when you run on one GPU.
+
+```shell
+./run_v2v.sh single \
 --config_path configs/wan_causal_dmd_v2v.yaml \
 --checkpoint_folder ckpts/wan_causal_dmd_v2v \
 --output_folder outputs/ \
@@ -69,12 +116,13 @@ python streamv2v/inference.py \
 --fps 16 \
 --step 2
 ```
-Note: `--step` sets how many denoising steps are used during inference.
 
 ### Multi-GPU
 
+Use this mode when you want to split inference across multiple GPUs.
+
 ```shell
-torchrun --nproc_per_node=2 --master_port=29501 streamv2v/inference_pipe.py \
+./run_v2v.sh pipe \
 --config_path configs/wan_causal_dmd_v2v.yaml \
 --checkpoint_folder ckpts/wan_causal_dmd_v2v \
 --output_folder outputs/ \
@@ -86,9 +134,12 @@ torchrun --nproc_per_node=2 --master_port=29501 streamv2v/inference_pipe.py \
 --step 2
 # --schedule_block  # optional: enable block scheduling
 ```
-Note: `--step` sets how many denoising steps are used during inference. Enabling `--schedule_block` can provide optimal throughput.
 
-Adjust `--nproc_per_node` to your GPU count. For different resolutions or FPS, change `--height`, `--width`, and `--fps` accordingly.
+Notes:
+
+- `--schedule_block` is optional and can improve throughput on some multi-GPU setups.
+- Adjust `NPROC_PER_NODE`, `--height`, `--width`, and `--fps` to match your hardware and target workload.
+- `./run_v2v.sh pipe --profile` is intended for profiling runs, not normal benchmarking or deployment.
 
 ## Online Inference (Web UI)
 A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo](demo/README.md).

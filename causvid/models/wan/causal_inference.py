@@ -5,6 +5,9 @@ from causvid.models import (
 )
 from typing import List, Optional
 import torch
+import logging
+
+LOGGER = logging.getLogger(__name__)
 
 
 class InferencePipeline(torch.nn.Module):
@@ -28,7 +31,9 @@ class InferencePipeline(torch.nn.Module):
 
         self.scheduler = self.generator.get_scheduler()
         if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time shift
-            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).cuda()
+            timesteps = torch.cat(
+                (self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))
+            ).to(device)
             self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
         self.num_transformer_blocks = 30
@@ -40,7 +45,7 @@ class InferencePipeline(torch.nn.Module):
         self.num_frame_per_block = getattr(
             args, "num_frame_per_block", 1)
 
-        print(f"KV inference with {self.num_frame_per_block} frames per block")
+        LOGGER.info("KV inference with %s frames per block", self.num_frame_per_block)
 
         if self.num_frame_per_block > 1:
             self.generator.model.num_frame_per_block = self.num_frame_per_block
@@ -165,7 +170,7 @@ class InferencePipeline(torch.nn.Module):
                         denoised_pred.flatten(0, 1),
                         torch.randn_like(denoised_pred.flatten(0, 1)),
                         next_timestep *
-                        torch.ones([batch_size], device="cuda",
+                        torch.ones([batch_size], device=noise.device,
                                    dtype=torch.long)
                     ).unflatten(0, denoised_pred.shape[:2])
                 else:

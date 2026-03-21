@@ -40,7 +40,6 @@ executing==2.2.0
 fastapi==0.117.1
 ffmpy==0.6.1
 filelock==3.13.1
-flash_attn==2.7.4.post1
 Flask==3.1.1
 Flask-SocketIO==5.5.1
 flatbuffers==25.2.10

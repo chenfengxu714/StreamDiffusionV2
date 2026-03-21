@@ -22,6 +22,7 @@ class Args(NamedTuple):
     model_type: str
     enable_metrics: bool
     target_latency: float
+    t2v: bool
 
     def pretty_print(self):
         print("\n")
@@ -32,6 +33,8 @@ class Args(NamedTuple):
 
 MAX_QUEUE_SIZE = int(os.environ.get("MAX_QUEUE_SIZE", 0))
 TIMEOUT = float(os.environ.get("TIMEOUT", 0))
+DEMO_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(DEMO_ROOT)
 
 default_host = os.getenv("HOST", "0.0.0.0")
 default_port = int(os.getenv("PORT", "7860"))
@@ -63,8 +66,16 @@ parser.add_argument(
 parser.add_argument("--timeout", type=float, default=TIMEOUT, help="Timeout")
 
 # This is the default config for the pipeline, it can be overridden by the command line arguments
-parser.add_argument("--config_path", type=str, default="../configs/wan_causal_dmd_v2v.yaml")
-parser.add_argument("--checkpoint_folder", type=str, default="../ckpts/wan_causal_dmd_v2v")
+parser.add_argument(
+    "--config_path",
+    type=str,
+    default=os.path.join(PROJECT_ROOT, "configs", "wan_causal_dmd_v2v.yaml"),
+)
+parser.add_argument(
+    "--checkpoint_folder",
+    type=str,
+    default=os.path.join(PROJECT_ROOT, "ckpts", "wan_causal_dmd_v2v"),
+)
 parser.add_argument("--step", type=int, default=2)
 parser.add_argument("--noise_scale", type=float, default=0.8)
 parser.add_argument("--debug", type=bool, default=True)
@@ -79,5 +90,17 @@ parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model ty
 # Metrics collection
 parser.add_argument("--enable-metrics", dest="enable_metrics", action="store_true", default=False, help="Enable SLO metrics collection")
 parser.add_argument("--target-latency", dest="target_latency", type=float, default=1.0, help="Target latency in seconds for deadline miss rate calculation (default: 0.5s)")
+parser.add_argument("--t2v", action="store_true", default=False)
 
-config = Args(**vars(parser.parse_args()))
+parsed_args = vars(parser.parse_args())
+parsed_args["config_path"] = os.path.abspath(parsed_args["config_path"])
+parsed_args["checkpoint_folder"] = os.path.abspath(parsed_args["checkpoint_folder"])
+
+gpu_ids = [gpu_id.strip() for gpu_id in parsed_args["gpu_ids"].split(",") if gpu_id.strip()]
+if len(gpu_ids) != parsed_args["num_gpus"]:
+    raise ValueError(
+        f"--gpu_ids expects {parsed_args['num_gpus']} entries, got {len(gpu_ids)} from '{parsed_args['gpu_ids']}'"
+    )
+parsed_args["gpu_ids"] = ",".join(gpu_ids)
+
+config = Args(**parsed_args)

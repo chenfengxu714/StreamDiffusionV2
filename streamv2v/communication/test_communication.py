@@ -169,7 +169,7 @@ class TestBufferManager(unittest.TestCase):
         self.buffer_manager.return_buffer(buffer2, "latent")
         
         stats = self.buffer_manager.get_statistics()
-        self.assertEqual(stats['allocation_count'], 2)
+        self.assertEqual(stats['allocation_count'], 1)
         self.assertEqual(stats['reuse_count'], 1)
         self.assertGreater(stats['total_allocated_memory_bytes'], 0)
     
@@ -284,6 +284,7 @@ class TestKVCacheManager(unittest.TestCase):
         # Mock pipeline with KV cache
         self.mock_pipeline = Mock()
         self.mock_pipeline.frame_seq_length = 16
+        self.mock_pipeline.denoising_step_list = [700, 500, 0]
         self.mock_pipeline.kv_cache1 = [
             {
                 'k': torch.randn(1, 8, 16, 64, device=self.device),
@@ -349,6 +350,9 @@ class TestModelDataTransfer(unittest.TestCase):
         
         self.buffer_manager = BufferManager(self.device, self.config)
         self.mock_pipeline = Mock()
+        self.mock_pipeline.frame_seq_length = 16
+        self.mock_pipeline.denoising_step_list = [700, 500, 0]
+        self.mock_pipeline.kv_cache1 = []
         self.kv_cache_manager = KVCacheManager(self.mock_pipeline, self.device)
         
         self.data_transfer = ModelDataTransfer(

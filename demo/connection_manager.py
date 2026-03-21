@@ -1,12 +1,13 @@
-from typing import Dict, List, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from uuid import UUID
 import asyncio
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
 import logging
-from vid2vid import Pipeline
 from types import SimpleNamespace
-import time
+
+if TYPE_CHECKING:
+    from vid2vid import Pipeline
 
 Connections = Dict[UUID, Dict[str, Union[WebSocket, asyncio.Queue]]]
 
@@ -18,21 +19,23 @@ class ServerFullException(Exception):
 
 
 class ConnectionManager:
-    def __init__(self):
+    def __init__(self, max_output_queue_size: int = 8):
         self.active_connections: Connections = {}
+        self.max_output_queue_size = max_output_queue_size
+        self.logger = logging.getLogger(__name__)
 
     async def connect(
         self, user_id: UUID, websocket: WebSocket, max_queue_size: int = 0
     ):
         await websocket.accept()
         user_count = self.get_user_count()
-        print(f"[ConnectionManager] User count: {user_count}")
+        self.logger.info("User count: %s", user_count)
         if max_queue_size > 0 and user_count >= max_queue_size:
-            print("[ConnectionManager] Server is full")
+            self.logger.warning("Server is full")
             await websocket.send_json({"status": "error", "message": "Server is full"})
             await websocket.close()
             raise ServerFullException("Server is full")
-        print(f"[ConnectionManager] New user connected: {user_id}")
+        self.logger.info("New user connected: %s", user_id)
         self.active_connections[user_id] = {
             "websocket": websocket,
             "queue": asyncio.Queue(),
@@ -74,7 +77,7 @@ class ConnectionManager:
                 return None
 
     def delete_user(self, user_id: UUID):
-        print(f"[ConnectionManager] Deleting user: {user_id}")
+        self.logger.info("Deleting user: %s", user_id)
         user_session = self.active_connections.pop(user_id, None)
         if user_session:
             queue = user_session["queue"]
@@ -101,25 +104,25 @@ class ConnectionManager:
                 return user_session["websocket"]
         return None
 
-    async def disconnect(self, user_id: UUID, pipeline: Pipeline = None):
-        print(f"[ConnectionManager] Disconnecting user: {user_id}")
+    async def disconnect(self, user_id: UUID, pipeline: Optional["Pipeline"] = None):
+        self.logger.info("Disconnecting user: %s", user_id)
         try:
             websocket = self.get_websocket(user_id)
             if websocket:
                 await websocket.close()
-                print(f"[ConnectionManager] WebSocket closed for user {user_id}")
+                self.logger.info("WebSocket closed for user %s", user_id)
         except Exception as e:
             logging.error(f"Error: Exception while closing websocket for {user_id}: {e}")
         finally:
             try:
                 self.delete_user(user_id)
-                print(f"[ConnectionManager] User {user_id} removed from connections")
+                self.logger.info("User %s removed from connections", user_id)
             except Exception as e:
                 logging.error(f"Error: Exception while clearing data for {user_id}: {e}")
 
-    async def disconnect_all(self, pipeline: Pipeline = None):
+    async def disconnect_all(self, pipeline: Optional["Pipeline"] = None):
         """Disconnect all users and close pipeline"""
-        print(f"[ConnectionManager] Disconnecting all {len(self.active_connections)} users...")
+        self.logger.info("Disconnecting all %s users...", len(self.active_connections))
         user_ids = list(self.active_connections.keys())
         for user_id in user_ids:
             await self.disconnect(user_id, pipeline)
@@ -127,7 +130,7 @@ class ConnectionManager:
         if pipeline:
             try:
                 pipeline.close()
-                print("[ConnectionManager] Pipeline closed")
+                self.logger.info("Pipeline closed")
             except Exception as e:
                 logging.error(f"Error: Exception while closing pipeline: {e}")
 
@@ -163,11 +166,11 @@ class ConnectionManager:
         if session:
             queue = session["output_queue"]
             for frame in frames:
-                if queue.full():
+                while queue.qsize() >= self.max_output_queue_size:
                     try:
                         queue.get_nowait()
                     except asyncio.QueueEmpty:
-                        pass
+                        break
                 await queue.put(frame)
 
     async def get_frame(self, user_id: UUID) -> bytes:
@@ -187,20 +190,30 @@ class ConnectionManager:
     # Set upload mode for user session
     def set_upload_mode(self, user_id: UUID, is_upload: bool):
         session = self.active_connections.get(user_id)
-        if session:
-            session["is_upload_mode"] = is_upload
-            if is_upload:
-                # Clear previous video frame data
-                session["video_frames"] = []
-                session["video_queue_index"] = 0
-                session["video_total_frames"] = 0
-                session["video_upload_completed"] = False
-                # Clear video frame queue
-                while not session["video_frame_queue"].empty():
-                    try:
-                        session["video_frame_queue"].get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
+        if not session:
+            return
+
+        current_mode = session.get("is_upload_mode", False)
+        if current_mode == is_upload:
+            return
+
+        session["is_upload_mode"] = is_upload
+        self.reset_upload_state(user_id)
+
+    def reset_upload_state(self, user_id: UUID):
+        session = self.active_connections.get(user_id)
+        if not session:
+            return
+
+        session["video_frames"] = []
+        session["video_queue_index"] = 0
+        session["video_total_frames"] = 0
+        session["video_upload_completed"] = False
+        while not session["video_frame_queue"].empty():
+            try:
+                session["video_frame_queue"].get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
     # Mark upload completed status
     def set_video_upload_completed(self, user_id: UUID, is_completed: bool):
@@ -233,7 +246,11 @@ class ConnectionManager:
             
         # If video frame queue is empty, refill with entire video
         if session["video_frame_queue"].empty() and session["video_frames"]:
-            print(f"[ConnectionManager] Refilling video queue for user {user_id}, total frames: {session['video_total_frames']}")
+            self.logger.info(
+                "Refilling video queue for user %s, total frames: %s",
+                user_id,
+                session["video_total_frames"],
+            )
             for frame in session["video_frames"]:
                 await session["video_frame_queue"].put(frame)
             session["video_queue_index"] = 0

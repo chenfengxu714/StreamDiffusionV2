@@ -34,7 +34,7 @@ export const lcmLiveActions = {
 
                 userId = crypto.randomUUID();
                 const websocketURL = `${window.location.protocol === "https:" ? "wss" : "ws"
-                    }:${window.location.host}/api/ws/${userId}`;
+                    }://${window.location.host}/api/ws/${userId}`;
 
                 websocket = new WebSocket(websocketURL);
                 websocket.onopen = () => {

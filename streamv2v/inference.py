@@ -12,56 +12,37 @@ from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipe
 from causvid.util import set_seed
 from diffusers.utils import export_to_video
 from causvid.data import TextDataset
-from omegaconf import OmegaConf
 import argparse
+from dataclasses import dataclass
 import torch
 import os
 import time
 import numpy as np
 import logging
+from typing import List
 
-import torchvision
-import torchvision.transforms.functional as TF
-from einops import rearrange
+try:
+    from streamv2v.inference_common import (
+        load_generator_state_dict,
+        load_mp4_as_tensor,
+        merge_cli_config,
+    )
+except ModuleNotFoundError:
+    from inference_common import load_generator_state_dict, load_mp4_as_tensor, merge_cli_config
+
+LOGGER = logging.getLogger(__name__)
 
 
-def load_mp4_as_tensor(
-    video_path: str,
-    max_frames: int = None,
-    resize_hw: tuple[int, int] = None,
-    normalize: bool = True,
-) -> torch.Tensor:
-    """
-    Load an .mp4 video and return it as a PyTorch tensor with shape [C, T, H, W].
-
-    Args:
-        video_path (str): Path to the input .mp4 video file
-        max_frames (int, optional): Maximum number of frames to load. If None, loads all frames
-        resize_hw (tuple, optional): Target (height, width) to resize each frame. If None, no resizing
-        normalize (bool, optional): Whether to normalize pixel values to [-1, 1]
-
-    Returns:
-        torch.Tensor: Tensor of shape [C, T, H, W], dtype=torch.float32
-    """
-    assert os.path.exists(video_path), f"Video file not found: {video_path}"
-
-    video, _, _ = torchvision.io.read_video(video_path, output_format="TCHW")
-    if max_frames is not None:
-        video = video[:max_frames]
-
-    video = rearrange(video, "t c h w -> c t h w")
-    if resize_hw is not None:
-        c, t, h0, w0 = video.shape
-        video = torch.stack([
-            TF.resize(video[:, i], resize_hw, antialias=True)
-            for i in range(t)
-        ], dim=1)
-    if video.dtype != torch.float32:
-        video = video.float()
-    if normalize:
-        video = video / 127.5 - 1.0
-
-    return video  # [C, T, H, W]
+@dataclass
+class SingleGPUStreamSession:
+    prompt: str
+    noise_scale: float
+    init_noise_scale: float
+    chunk_size: int
+    current_start: int
+    current_end: int
+    last_image: torch.Tensor
+    processed: int = 0
 
 def compute_noise_scale_and_step(input_video_original: torch.Tensor, end_idx: int, chunk_size: int, noise_scale: float, init_noise_scale: float):
     """Compute adaptive noise scale and current step based on video content."""
@@ -115,29 +96,15 @@ class SingleGPUInferencePipeline:
         self.t_refresh = 50
 
         self.t2v = config.t2v
+        self.profile = bool(config.get("profile", False))
 
         
         self.logger.info("Single GPU inference pipeline manager initialized")
     
     def load_model(self, checkpoint_folder: str):
         """Load the model from checkpoint."""
-        ckpt_path = os.path.join(checkpoint_folder, "model.pt")
+        ckpt_path, state_dict = load_generator_state_dict(checkpoint_folder)
         self.logger.info(f"Loading checkpoint from {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-
-        # Decide which key holds the generator state dict
-        if isinstance(ckpt, dict):
-            if 'generator' in ckpt:
-                state_dict = ckpt['generator']
-            elif 'generator_ema' in ckpt:
-                state_dict = ckpt['generator_ema']
-            elif 'state_dict' in ckpt:
-                state_dict = ckpt['state_dict']
-            else:
-                # Assume the checkpoint itself is a state dict
-                state_dict = ckpt
-        else:
-            state_dict = ckpt
 
         # Load into the pipeline generator
         try:
@@ -160,6 +127,107 @@ class SingleGPUInferencePipeline:
             current_end=current_end
         )
         return denoised_pred
+
+    def _sync_for_timing(self):
+        if self.profile:
+            torch.cuda.synchronize()
+
+    def reset_stream_state(self, reset_vae_flags: bool = True) -> None:
+        """Reset cached model state before starting a new streaming session."""
+        if reset_vae_flags:
+            self.pipeline.vae.model.first_encode = True
+            self.pipeline.vae.model.first_decode = True
+
+        self.pipeline.kv_cache1 = None
+        self.pipeline.crossattn_cache = None
+        self.pipeline.block_x = None
+        self.pipeline.hidden_states = None
+        self.processed = 0
+
+    def _encode_noisy_latents(self, images: torch.Tensor, noise_scale: float) -> torch.Tensor:
+        latents = self.pipeline.vae.stream_encode(images)
+        latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
+        noise = torch.randn_like(latents)
+        return noise * noise_scale + latents * (1 - noise_scale)
+
+    def _decode_video_array(self, denoised_pred: torch.Tensor, last_frame_only: bool = False) -> np.ndarray:
+        if last_frame_only:
+            denoised_pred = denoised_pred[[-1]]
+
+        video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+        video = (video * 0.5 + 0.5).clamp(0, 1)
+        video = video[0].permute(0, 2, 3, 1).contiguous()
+        return video.cpu().float().numpy()
+
+    def start_stream_session(self, prompt: str, images: torch.Tensor, noise_scale: float) -> tuple[SingleGPUStreamSession, np.ndarray]:
+        """Initialize a streaming session and return the first decoded frames."""
+        self.reset_stream_state(reset_vae_flags=True)
+
+        chunk_size = self.base_chunk_size * self.pipeline.num_frame_per_block
+        current_start = 0
+        current_end = self.pipeline.frame_seq_length * (1 + chunk_size // self.base_chunk_size)
+
+        noisy_latents = self._encode_noisy_latents(images, noise_scale)
+        denoised_pred = self.prepare_pipeline(
+            text_prompts=[prompt],
+            noise=noisy_latents,
+            current_start=current_start,
+            current_end=current_end,
+        )
+        initial_video = self._decode_video_array(denoised_pred, last_frame_only=False)
+
+        session = SingleGPUStreamSession(
+            prompt=prompt,
+            noise_scale=noise_scale,
+            init_noise_scale=noise_scale,
+            chunk_size=chunk_size,
+            current_start=current_end,
+            current_end=current_end + (chunk_size // self.base_chunk_size) * self.pipeline.frame_seq_length,
+            last_image=images[:, :, [-1]],
+            processed=0,
+        )
+        return session, initial_video
+
+    def run_stream_batch(self, session: SingleGPUStreamSession, images: torch.Tensor) -> List[np.ndarray]:
+        """Process one or more chunk-aligned frame groups for an active streaming session."""
+        num_frames = images.shape[2]
+        input_batch = num_frames // session.chunk_size
+        noise_scale, current_step = compute_noise_scale_and_step(
+            input_video_original=torch.cat([session.last_image, images], dim=2),
+            end_idx=num_frames + 1,
+            chunk_size=num_frames,
+            noise_scale=float(session.noise_scale),
+            init_noise_scale=float(session.init_noise_scale),
+        )
+        noisy_latents = self._encode_noisy_latents(images, noise_scale)
+
+        outputs: List[np.ndarray] = []
+        num_steps = len(self.pipeline.denoising_step_list)
+
+        for batch_idx in range(input_batch):
+            if session.current_start // self.pipeline.frame_seq_length >= self.t_refresh:
+                session.current_start = self.pipeline.kv_cache_length - self.pipeline.frame_seq_length
+                session.current_end = session.current_start + (session.chunk_size // self.base_chunk_size) * self.pipeline.frame_seq_length
+
+            denoised_pred = self.pipeline.inference_stream(
+                noise=noisy_latents[:, batch_idx].unsqueeze(1),
+                current_start=session.current_start,
+                current_end=session.current_end,
+                current_step=current_step,
+            )
+
+            session.processed += 1
+            self.processed = session.processed
+
+            if session.processed >= num_steps:
+                outputs.append(self._decode_video_array(denoised_pred, last_frame_only=True))
+
+            session.current_start = session.current_end
+            session.current_end += (session.chunk_size // self.base_chunk_size) * self.pipeline.frame_seq_length
+
+        session.last_image = images[:, :, [-1]]
+        session.noise_scale = noise_scale
+        return outputs
     
     def run_inference(
         self, 
@@ -196,7 +264,7 @@ class SingleGPUInferencePipeline:
         current_start = 0
         current_end = self.pipeline.frame_seq_length * (1+(end_idx-1)//4)
         
-        torch.cuda.synchronize()
+        self._sync_for_timing()
         start_time = time.time()
         
         # Process first chunk (initialization)
@@ -226,7 +294,14 @@ class SingleGPUInferencePipeline:
         video = (video * 0.5 + 0.5).clamp(0, 1)
         video = video[0].permute(0, 2, 3, 1).contiguous()
         results[save_results] = video.cpu().float().numpy()
-        print(f"start:{current_start}, end: {current_end}, start_idx: {start_idx}, save_results: {save_results}, T: {video.shape[0]}")
+        self.logger.info(
+            "Prepared initial chunk: start=%s, end=%s, start_idx=%s, save_results=%s, frames=%s",
+            current_start,
+            current_end,
+            start_idx,
+            save_results,
+            video.shape[0],
+        )
         save_results += 1
         
         init_noise_scale = noise_scale
@@ -256,7 +331,7 @@ class SingleGPUInferencePipeline:
                 noisy_latents = torch.randn(1,self.pipeline.num_frame_per_block,16,self.pipeline.height,self.pipeline.width, device=self.device, dtype=torch.bfloat16)
                 current_step = None # Use default steps
 
-            torch.cuda.synchronize()
+            self._sync_for_timing()
             dit_start_time = time.time()
                 
             # DiT inference - using input mode to process all 30 blocks
@@ -268,8 +343,9 @@ class SingleGPUInferencePipeline:
             )
 
             if self.processed > self.processed_offset:
-                torch.cuda.synchronize()
-                dit_fps_list.append(chunk_size/(time.time()-dit_start_time))
+                self._sync_for_timing()
+                if self.profile:
+                    dit_fps_list.append(chunk_size / (time.time() - dit_start_time))
             
             self.processed += 1
             
@@ -284,29 +360,37 @@ class SingleGPUInferencePipeline:
                 save_results += 1
             
                 # Update timing
-                torch.cuda.synchronize()
-                end_time = time.time()
-                t = end_time - start_time
-                fps_test = chunk_size/t
-                fps_list.append(fps_test)
-                self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, FPS: {fps_test:.4f}")
+                if self.profile:
+                    self._sync_for_timing()
+                    end_time = time.time()
+                    t = end_time - start_time
+                    fps_test = chunk_size / t
+                    fps_list.append(fps_test)
+                    self.logger.info(f"Processed {self.processed}, time: {t:.4f} s, FPS: {fps_test:.4f}")
+                else:
+                    fps_test = None
 
-                if self.processed==num_steps+self.processed_offset and target_fps is not None and fps_test<target_fps:
+                if self.processed == num_steps + self.processed_offset and target_fps is not None and fps_test is not None and fps_test < target_fps:
                     max_chunk_size = (self.pipeline.num_kv_cache - self.pipeline.num_sink_tokens - 1) * self.base_chunk_size
                     num_chunks=(num_chunks-self.processed-num_steps+1)//(max_chunk_size//chunk_size)+self.processed-num_steps+1
                     self.pipeline.hidden_states=self.pipeline.hidden_states.repeat(1,max_chunk_size//chunk_size,1,1,1)
                     chunk_size = max_chunk_size
                     self.logger.info(f"Adjust chunk size to {chunk_size}")
 
-                start_time = end_time
+                if self.profile:
+                    start_time = end_time
         
 
         # Save final video
         video_list = [results[i] for i in range(num_chunks)]
         video = np.concatenate(video_list, axis=0)
-        fps_avg = np.mean(np.array(fps_list))
-        self.logger.info(f"DiT Average FPS: {np.mean(np.array(dit_fps_list)):.4f}")
-        self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
+        if self.profile and fps_list:
+            fps_avg = np.mean(np.array(fps_list))
+            dit_avg = np.mean(np.array(dit_fps_list)) if dit_fps_list else 0.0
+            self.logger.info(f"DiT Average FPS: {dit_avg:.4f}")
+            self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
+        else:
+            self.logger.info(f"Video shape: {video.shape}")
         
         output_path = os.path.join(output_folder, f"output_{0:03d}.mp4")
         export_to_video(video, output_path, fps=fps)
@@ -334,6 +418,7 @@ def main():
     parser.add_argument("--fixed_noise_scale", action="store_true", default=False)
     parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--target_fps", type=int, required=False, default=None, help="Video length (number of frames)")
+    parser.add_argument("--profile", action="store_true", default=False, help="Enable synchronized throughput logging")
     args = parser.parse_args()
     
     torch.set_grad_enabled(False)
@@ -342,23 +427,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load configuration
-    config = OmegaConf.load(args.config_path)
-    config = OmegaConf.merge(config, OmegaConf.create(vars(args)))
-    # Derive denoising_step_list from step if provided
-    # Always base on the canonical full list to ensure --step overrides YAML
-    full_denoising_list = config.denoising_step_list
-    step_value = int(args.step)
-    config.denoising_step_list = full_denoising_list[:step_value]
-    config.denoising_step_list.append(0)
+    config = merge_cli_config(args.config_path, args)
 
     set_seed(args.seed)
 
-    print(f"Denoising Step List: {config.denoising_step_list}")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    LOGGER.info("Denoising Step List: %s", list(config.denoising_step_list))
     
     # Load input video
     if not args.t2v:
         input_video_original = load_mp4_as_tensor(args.video_path, resize_hw=(args.height, args.width)).unsqueeze(0)
-        print(f"Input video tensor shape: {input_video_original.shape}")
+        LOGGER.info("Input video tensor shape: %s", tuple(input_video_original.shape))
         b, c, t, h, w = input_video_original.shape
         if input_video_original.dtype != torch.bfloat16:
             input_video_original = input_video_original.to(dtype=torch.bfloat16).to(device)
@@ -395,7 +474,7 @@ def main():
             num_steps,
         )
     except Exception as e:
-        print(f"Error occurred during inference: {e}")
+        LOGGER.exception("Error occurred during inference: %s", e)
         raise
 
 

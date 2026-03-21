@@ -10,7 +10,7 @@ This demo provides a simple web interface for live video-to-video inference usin
 ## Setup
 1) Complete the Python environment and model checkpoint setup as described in the root `README.md` (Installation and Download Checkpoints).
 2) Build the frontend and start the backend via the script:
-```
+```shell
 # Install
 cd demo
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
@@ -30,14 +30,18 @@ The script will:
 - Install and build the frontend (`npm install && npm run build` in `demo/frontend`)
 - Launch the backend with `torchrun` on port `7860` and host `0.0.0.0`
 
+You can override the runtime configuration through environment variables, for example:
+```shell
+HOST=0.0.0.0 PORT=7860 GPU_IDS=0 STEP=2 ./start.sh
+```
 ## Access
 - Local: `http://0.0.0.0:7860` or `http://localhost:7860`
 - Remote server: `http://<server-ip>:7860` (ensure the port is open)
 
 ## Multi-GPU and Denoising Timesteps
-- Edit `start.sh`: By default, `start.sh` uses `num_gpus=1`. To enable multi-GPU inference on a single node or adjust the denoising steps, edit the corresponding variables in `start.sh`.  For example:
-```
-python main.py --port 7860 --host 0.0.0.0 --num_gpus 2 --gpu_ids 0,1 --step 2
+- `start.sh` derives `num_gpus` from `GPU_IDS`. To enable multi-GPU inference on a single node or adjust denoising steps, override the environment variables. For example:
+```shell
+GPU_IDS=0,1 STEP=2 ./start.sh
 ```
 Our model supports denoising steps from 1 to 4 — feel free to set this value as needed.  
 For real-time live-streaming applications, we found that using **2 steps** provides a good balance between speed and quality.

@@ -118,6 +118,17 @@ class ModelDataTransfer:
             patched_x_shape=patched_x_shape
         )
 
+    def release_latent_data(self, latent_data: Optional[LatentData]) -> None:
+        """Return received latent-data buffers to the buffer pool."""
+        if latent_data is None or self.buffer_mgr is None:
+            return
+
+        self.buffer_mgr.return_buffer(latent_data.latents, "latent")
+        self.buffer_mgr.return_buffer(latent_data.original_latents, "origin")
+        self.buffer_mgr.return_buffer(latent_data.patched_x_shape, "misc")
+        self.buffer_mgr.return_buffer(latent_data.current_start, "misc")
+        self.buffer_mgr.return_buffer(latent_data.current_end, "misc")
+
     def send_prompt_async(self, prompt: str, device: torch.device) -> List[Any]:
         return self.comm.send_prompt_async(prompt, device)
 
@@ -256,4 +267,7 @@ class ModelDataTransfer:
     
     def __del__(self):
         """Cleanup when the transfer manager is destroyed."""
-        self.cleanup()
+        try:
+            self.cleanup()
+        except Exception:
+            pass

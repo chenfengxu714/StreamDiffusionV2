@@ -19,6 +19,14 @@ lib64/
 parts/
 sdist/
 var/
+ckpts/
+ckpts
+wan_models/
+wan_models
+v2v.sh
+v2v_wo.sh
+pipe_v2v.sh
+work.md
 wheels/
 share/python-wheels/
 *.egg-info/

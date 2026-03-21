@@ -12,6 +12,9 @@ import logging
 from .data_containers import CommunicationConfig
 
 
+BufferKey = Tuple[Tuple[int, ...], torch.dtype]
+
+
 class BufferManager:
     """
     Manages GPU buffer pools to avoid repeated allocations.
@@ -31,11 +34,11 @@ class BufferManager:
         self.device = device
         self.config = config or CommunicationConfig()
         
-        # Buffer pools: {shape: [tensor1, tensor2, ...]}
-        self.free_buffers = {}  # For latent tensors
-        self.free_buffers_origin = {}  # For original latent tensors
-        self.free_buffers_kv = {}  # For KV cache tensors
-        self.free_buffers_misc = {}  # For headers, shapes, index vectors (int64 etc.)
+        # Buffer pools: {(shape, dtype): [tensor1, tensor2, ...]}
+        self.free_buffers: Dict[BufferKey, List[torch.Tensor]] = {}
+        self.free_buffers_origin: Dict[BufferKey, List[torch.Tensor]] = {}
+        self.free_buffers_kv: Dict[BufferKey, List[torch.Tensor]] = {}
+        self.free_buffers_misc: Dict[BufferKey, List[torch.Tensor]] = {}
         
         # Thread safety
         self._lock = threading.Lock()
@@ -85,10 +88,12 @@ class BufferManager:
                 raise ValueError(f"Unknown buffer type: {buffer_type}")
             
             # Try to reuse existing buffer
-            if self.config.enable_buffer_reuse and shape in buffer_pool and len(buffer_pool[shape]) > 0:
-                buffer = buffer_pool[shape].pop()
+            key = (tuple(shape), dtype)
+
+            if self.config.enable_buffer_reuse and key in buffer_pool and len(buffer_pool[key]) > 0:
+                buffer = buffer_pool[key].pop()
                 self.reuse_count += 1
-                self.logger.debug(f"Reused buffer of shape {shape}, type {buffer_type}")
+                self.logger.debug(f"Reused buffer of shape {shape}, dtype {dtype}, type {buffer_type}")
                 return buffer
             
             # Allocate new buffer
@@ -96,7 +101,7 @@ class BufferManager:
             self.allocation_count += 1
             self.total_allocated_memory += buffer.numel() * buffer.element_size()
             
-            self.logger.debug(f"Allocated new buffer of shape {shape}, type {buffer_type}")
+            self.logger.debug(f"Allocated new buffer of shape {shape}, dtype {dtype}, type {buffer_type}")
             return buffer
     
     def return_buffer(self, tensor: torch.Tensor, buffer_type: str = "latent") -> None:
@@ -123,20 +128,22 @@ class BufferManager:
             else:
                 raise ValueError(f"Unknown buffer type: {buffer_type}")
             
-            shape = tuple(tensor.shape)
+            key = (tuple(tensor.shape), tensor.dtype)
             
             # Initialize pool for this shape if it doesn't exist
-            if shape not in buffer_pool:
-                buffer_pool[shape] = []
+            if key not in buffer_pool:
+                buffer_pool[key] = []
             
             # Add buffer to pool if not at capacity
-            if len(buffer_pool[shape]) < self.config.buffer_pool_size:
-                # Clear the tensor to free memory
-                tensor.zero_()
-                buffer_pool[shape].append(tensor)
-                self.logger.debug(f"Returned buffer of shape {shape}, type {buffer_type}")
+            if len(buffer_pool[key]) < self.config.buffer_pool_size:
+                buffer_pool[key].append(tensor)
+                self.logger.debug(
+                    f"Returned buffer of shape {tuple(tensor.shape)}, dtype {tensor.dtype}, type {buffer_type}"
+                )
             else:
-                self.logger.debug(f"Buffer pool full for shape {shape}, type {buffer_type}, discarding")
+                self.logger.debug(
+                    f"Buffer pool full for shape {tuple(tensor.shape)}, dtype {tensor.dtype}, type {buffer_type}, discarding"
+                )
     
     def clear_buffers(self, buffer_type: Optional[str] = None) -> None:
         """
@@ -227,10 +234,11 @@ class BufferManager:
                         raise ValueError(f"Unknown buffer type: {buffer_type}")
                     
                     # Initialize pool for this shape if it doesn't exist
-                    if shape not in buffer_pool:
-                        buffer_pool[shape] = []
+                    key = (tuple(shape), dtype)
+                    if key not in buffer_pool:
+                        buffer_pool[key] = []
                     
-                    buffer_pool[shape].append(buffer)
+                    buffer_pool[key].append(buffer)
                     self.allocation_count += 1
                     self.total_allocated_memory += buffer.numel() * buffer.element_size()
             
@@ -238,4 +246,7 @@ class BufferManager:
     
     def __del__(self):
         """Cleanup when the buffer manager is destroyed."""
-        self.clear_buffers()
+        try:
+            self.clear_buffers()
+        except Exception:
+            pass

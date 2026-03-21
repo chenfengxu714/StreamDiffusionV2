@@ -12,7 +12,6 @@ import time
 from types import SimpleNamespace
 import asyncio
 import os
-import time
 import mimetypes
 import threading
 import multiprocessing as mp
@@ -28,7 +27,7 @@ from connection_manager import ConnectionManager, ServerFullException
 mimetypes.add_type("application/javascript", ".js")
 
 THROTTLE = 1.0 / 120
-# logging.basicConfig(level=logging.DEBUG)
+LOGGER = logging.getLogger(__name__)
 
 
 class App:
@@ -37,9 +36,10 @@ class App:
         self.pipeline = pipeline
         self.app = FastAPI()
         self.conn_manager = ConnectionManager()
-        self.produce_predictions_stop_event = None
-        self.produce_predictions_task = None
+        self.prediction_workers = {}
         self.shutdown_event = asyncio.Event()
+        self.demo_root = os.path.dirname(os.path.abspath(__file__))
+        self.frontend_public_dir = os.path.join(self.demo_root, "frontend", "public")
         # Initialize metrics collection only if enabled
         self.enable_metrics = config.enable_metrics
         self.target_latency = config.target_latency  # Target latency in seconds for deadline miss rate
@@ -76,6 +76,7 @@ class App:
             except ServerFullException as e:
                 logging.error(f"Server Full: {e}")
             finally:
+                await self._stop_prediction_worker(user_id)
                 # Do not block shutdown here; schedule disconnect
                 asyncio.create_task(self.conn_manager.disconnect(user_id, self.pipeline))
                 # Clean up metrics and timestamp tracking for this user
@@ -85,10 +86,6 @@ class App:
                         self.user_batch_count.pop(user_id, None)
                         self.user_latency_history.pop(user_id, None)
                         self.user_raw_data.pop(user_id, None)
-                if self.produce_predictions_stop_event is not None:
-                    self.produce_predictions_stop_event.set()
-                if self.produce_predictions_task is not None:
-                    self.produce_predictions_task.cancel()
                 logging.info(f"User disconnected: {user_id}")
 
         async def handle_websocket_data(user_id: uuid.UUID):
@@ -129,7 +126,7 @@ class App:
                     # Mark upload completion: after this, don't receive image bytes again
                     if data and data.get("status") == "upload_done":
                         self.conn_manager.set_video_upload_completed(user_id, True)
-                        print(f"[Main] Upload completed for user {user_id}")
+                        LOGGER.info("Upload completed for user %s", user_id)
                         await self.conn_manager.send_json(user_id, {"status": "upload_done_ack"})
                         continue
                     if not data or data.get("status") != "next_frame":
@@ -139,13 +136,13 @@ class App:
                     params = await self.conn_manager.receive_json(user_id)
                     params = self.pipeline.InputParams(**params)
                     info = self.pipeline.Info()
-                    params = SimpleNamespace(**params.dict())
+                    params = self.pipeline.params_to_namespace(params)
                     
                     # Check if upload mode is enabled
                     is_upload_mode = params.__dict__.get('input_mode') == 'upload' or params.__dict__.get('upload_mode', False)
                     self.conn_manager.set_upload_mode(user_id, is_upload_mode)
                     if is_upload_mode:
-                        print(f"[Main] Upload mode detected for user {user_id}")
+                        LOGGER.debug("Upload mode detected for user %s", user_id)
                     
                     if info.input_mode == "image":
                         upload_completed = self.conn_manager.is_video_upload_completed(user_id)
@@ -173,7 +170,7 @@ class App:
                             # If upload mode and not completed, append frames to cache for later reuse
                             if is_upload_mode and not upload_completed:
                                 await self.conn_manager.add_video_frame(user_id, image_data)
-                                print(f"[Main] Added frame to video queue for user {user_id} (16 FPS throttled)")
+                                LOGGER.debug("Buffered uploaded frame for user %s", user_id)
                             # For camera mode, set current image directly
                             if not is_upload_mode:
                                 params.image = bytes_to_pil(image_data)
@@ -275,7 +272,7 @@ class App:
                                     
                                     last_params = params
                                     self.pipeline.accept_new_params(params)
-                                    print(f"[Main] Upload mode: sent frame to pipeline for user {user_id}")
+                                    LOGGER.debug("Sent cached upload frame to pipeline for user %s", user_id)
                                 # Yield control without delaying to maximize fluency
                                 # await asyncio.sleep(sleep_time)
                             else:
@@ -284,6 +281,8 @@ class App:
                         else:
                             # Camera mode: normal processing
                             params = await self.conn_manager.get_latest_data(user_id)
+                            if params is None:
+                                break
                             if vars(params) and params.__dict__ != last_params.__dict__:
                                 last_params = params
                                 # Record input timestamp when frame is added to pipeline queue
@@ -335,7 +334,7 @@ class App:
                             # Output timestamp is already recorded in produce_predictions
                             
                             yield frame
-                            if not is_firefox(request.headers["user-agent"]):
+                            if not is_firefox(request.headers.get("user-agent", "")):
                                 yield frame
                             if last_frame_time is None:
                                 last_frame_time = time.time()
@@ -345,7 +344,7 @@ class App:
                                     frame_time_list.pop(0)
                                 last_frame_time = time.time()
                         except Exception as e:
-                            print(f"Frame fetch error: {e}")
+                            LOGGER.error("Frame fetch error for user %s: %s", user_id, e)
                             break
 
                         await asyncio.sleep(sleep_time)
@@ -401,11 +400,14 @@ class App:
                                             self.user_raw_data[user_id] = []
                                         self.user_raw_data[user_id].append(raw_batch_data)
                                         
-                                        print(f"[Metrics] Batch {batch_num}/1000: "
-                                              f"current_frames={len(batch_latencies)}, "
-                                              f"avg_latency={avg_latency:.4f}s, "
-                                              f"remaining={remaining_frames}, "
-                                              f"data_count={len(self.user_latency_history[user_id])}")
+                                        LOGGER.info(
+                                            "[Metrics] Batch %s/1000: current_frames=%s, avg_latency=%.4fs, remaining=%s, data_count=%s",
+                                            batch_num,
+                                            len(batch_latencies),
+                                            avg_latency,
+                                            remaining_frames,
+                                            len(self.user_latency_history[user_id]),
+                                        )
                                         
                                         # Log after 1000 batches
                                         if batch_num >= 1000:
@@ -423,10 +425,11 @@ class App:
                             loop
                         )
 
-                self.produce_predictions_stop_event = threading.Event()
-                self.produce_predictions_task = asyncio.create_task(asyncio.to_thread(
-                    produce_predictions, user_id, asyncio.get_running_loop(), self.produce_predictions_stop_event
-                ))
+                await self._start_prediction_worker(
+                    user_id,
+                    produce_predictions,
+                    asyncio.get_running_loop(),
+                )
                 asyncio.create_task(push_frames_to_pipeline())
                 await self.conn_manager.send_json(user_id, {"status": "send_frame"})
 
@@ -439,8 +442,7 @@ class App:
             except Exception as e:
                 logging.error(f"Streaming Error: {e}, {user_id} ")
                 # Stop prediction thread on error
-                if self.produce_predictions_stop_event is not None:
-                    self.produce_predictions_stop_event.set()
+                await self._stop_prediction_worker(user_id)
                 return HTTPException(status_code=404, detail="User not found")
 
         # route to setup frontend
@@ -461,17 +463,16 @@ class App:
                 }
             )
 
-        if not os.path.exists("./frontend/public"):
-            os.makedirs("./frontend/public")
+        os.makedirs(self.frontend_public_dir, exist_ok=True)
 
         self.app.mount(
-            "/", StaticFiles(directory="./frontend/public", html=True), name="public"
+            "/", StaticFiles(directory=self.frontend_public_dir, html=True), name="public"
         )
 
         # Add shutdown event handler
         @self.app.on_event("shutdown")
         async def shutdown_event():
-            print("[App] Shutdown event triggered, cleaning up...")
+            LOGGER.info("Shutdown event triggered, cleaning up...")
             await self.cleanup()
 
     def _log_metrics_to_file(self, user_id: uuid.UUID):
@@ -482,7 +483,7 @@ class App:
             
             # Get latency history
             if user_id not in self.user_latency_history or len(self.user_latency_history[user_id]) == 0:
-                print(f"[Metrics] No latency data to log for user {user_id}")
+                LOGGER.info("[Metrics] No latency data to log for user %s", user_id)
                 return
             
             latencies = np.array(self.user_latency_history[user_id])
@@ -577,44 +578,60 @@ class App:
             with open(statistics_filename, 'w') as f:
                 json.dump(statistics_content, f, indent=2)
             
-            print(f"[Metrics] Logged metrics to {session_dir}/")
-            print(f"[Metrics]   - Raw data: raw_data_{user_id}.json")
-            print(f"[Metrics]   - Statistics: statistics_{user_id}.json")
-            print(f"[Metrics] Summary: mean={stats['mean_latency']:.4f}s, "
-                  f"p95={stats['p95_latency']:.4f}s, "
-                  f"miss_rate={deadline_stats['deadline_miss_rate']*100:.2f}%")
+            LOGGER.info("[Metrics] Logged metrics to %s/", session_dir)
+            LOGGER.info("[Metrics]   - Raw data: raw_data_%s.json", user_id)
+            LOGGER.info("[Metrics]   - Statistics: statistics_%s.json", user_id)
+            LOGGER.info(
+                "[Metrics] Summary: mean=%.4fs, p95=%.4fs, miss_rate=%.2f%%",
+                stats["mean_latency"],
+                stats["p95_latency"],
+                deadline_stats["deadline_miss_rate"] * 100,
+            )
             
         except Exception as e:
             logging.error(f"Error logging metrics to file: {e}")
     
     async def cleanup(self):
         """Clean up all resources on shutdown"""
-        print("[App] Starting cleanup process...")
+        LOGGER.info("Starting cleanup process...")
         
         # Set shutdown event
         self.shutdown_event.set()
         
         # Stop all background tasks
-        if self.produce_predictions_stop_event is not None:
-            self.produce_predictions_stop_event.set()
-            print("[App] Stopped prediction tasks")
-        
-        if self.produce_predictions_task is not None:
-            self.produce_predictions_task.cancel()
-            try:
-                await self.produce_predictions_task
-            except asyncio.CancelledError:
-                pass
-            print("[App] Cancelled prediction task")
+        for user_id in list(self.prediction_workers):
+            await self._stop_prediction_worker(user_id)
+        LOGGER.info("Stopped prediction tasks")
         
         # Close all WebSocket connections and pipeline
-        print(f"[App] Closing {len(self.conn_manager.active_connections)} active connections...")
+        LOGGER.info("Closing %s active connections...", len(self.conn_manager.active_connections))
         try:
             await self.conn_manager.disconnect_all(self.pipeline)
         except Exception as e:
-            print(f"[App] Error during disconnect_all: {e}")
+            LOGGER.error("Error during disconnect_all: %s", e)
         
-        print("[App] Cleanup completed")
+        LOGGER.info("Cleanup completed")
+
+    async def _start_prediction_worker(self, user_id, produce_predictions, loop):
+        await self._stop_prediction_worker(user_id)
+        stop_event = threading.Event()
+        task = asyncio.create_task(
+            asyncio.to_thread(produce_predictions, user_id, loop, stop_event)
+        )
+        self.prediction_workers[user_id] = (stop_event, task)
+
+    async def _stop_prediction_worker(self, user_id):
+        worker = self.prediction_workers.pop(user_id, None)
+        if worker is None:
+            return
+
+        stop_event, task = worker
+        stop_event.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 # Global app instance for signal handler
@@ -622,7 +639,7 @@ app_instance = None
 
 def signal_handler(signum, frame):
     """Handle Ctrl+C gracefully"""
-    print(f"\n[Main] Received signal {signum}, shutting down gracefully...")
+    LOGGER.info("Received signal %s, shutting down gracefully...", signum)
     if app_instance:
         # Trigger cleanup in a separate thread to avoid blocking
         import threading
@@ -633,7 +650,7 @@ def signal_handler(signum, frame):
                 loop.run_until_complete(app_instance.cleanup())
                 loop.close()
             except Exception as e:
-                print(f"[Main] Error during cleanup: {e}")
+                LOGGER.error("Error during cleanup: %s", e)
         
         cleanup_thread = threading.Thread(target=trigger_cleanup)
         cleanup_thread.daemon = True
@@ -644,6 +661,8 @@ def signal_handler(signum, frame):
 
 if __name__ == "__main__":
     import uvicorn
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
@@ -673,7 +692,7 @@ if __name__ == "__main__":
             ssl_keyfile=config.ssl_keyfile,
         )
     except KeyboardInterrupt:
-        print("\n[Main] KeyboardInterrupt received, shutting down...")
+        LOGGER.info("KeyboardInterrupt received, shutting down...")
         # Trigger cleanup
         try:
             import asyncio
@@ -682,8 +701,8 @@ if __name__ == "__main__":
             loop.run_until_complete(app_obj.cleanup())
             loop.close()
         except Exception as e:
-            print(f"[Main] Error during cleanup: {e}")
+            LOGGER.error("Error during cleanup: %s", e)
         sys.exit(0)
     except Exception as e:
-        print(f"[Main] Error: {e}")
+        LOGGER.error("Fatal error: %s", e)
         sys.exit(1)
