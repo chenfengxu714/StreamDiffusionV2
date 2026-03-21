@@ -65,6 +65,7 @@ cover/
 
 # Django stuff:
 *.log
+*.nsys-rep
 local_settings.py
 db.sqlite3
 db.sqlite3-journal

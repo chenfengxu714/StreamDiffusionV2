@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import torch
 import math
+from collections import OrderedDict
 import torch.distributed as dist
 import warnings
 
@@ -33,38 +34,67 @@ except ModuleNotFoundError:
 flex_attention = torch.compile(
     flex_attention, dynamic=False, mode="max-autotune")
 
+_CAUSAL_ROPE_FREQ_CACHE = OrderedDict()
+_CAUSAL_ROPE_FREQ_CACHE_SIZE = 16
+
+
+def _causal_rope_cache_key(freqs, f, h, w, start_frame, device):
+    return (
+        freqs,
+        device.type,
+        device.index,
+        f,
+        h,
+        w,
+        start_frame,
+    )
+
+
+def _get_causal_rope_freqs(freqs_source, freqs_parts, f, h, w, start_frame, device):
+    key = _causal_rope_cache_key(freqs_source, f, h, w, start_frame, device)
+    cached = _CAUSAL_ROPE_FREQ_CACHE.get(key)
+    if cached is not None:
+        _CAUSAL_ROPE_FREQ_CACHE.move_to_end(key)
+        return cached
+
+    temporal, height, width = freqs_parts
+    temporal_freqs = temporal[start_frame:start_frame + f].repeat_interleave(h * w, dim=0)
+    height_freqs = height[:h].repeat_interleave(w, dim=0).repeat(f, 1)
+    width_freqs = width[:w].repeat(h, 1).repeat(f, 1)
+    rope_freqs = torch.cat([temporal_freqs, height_freqs, width_freqs], dim=-1).unsqueeze(1)
+
+    _CAUSAL_ROPE_FREQ_CACHE[key] = rope_freqs
+    if len(_CAUSAL_ROPE_FREQ_CACHE) > _CAUSAL_ROPE_FREQ_CACHE_SIZE:
+        _CAUSAL_ROPE_FREQ_CACHE.popitem(last=False)
+    return rope_freqs
+
 
 def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     n, c = x.size(2), x.size(3) // 2
 
     # split freqs
+    freqs_source = freqs
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
-    # loop over samples
-    output = []
+    if isinstance(start_frame, torch.Tensor):
+        start_frames = start_frame.tolist()
+    else:
+        start_frames = [int(start_frame)] * x.size(0)
 
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+    output = x.clone()
+
+    for i, (grid_size, sf) in enumerate(zip(grid_sizes.tolist(), start_frames)):
+        f, h, w = grid_size
         seq_len = f * h * w
 
-        sf = start_frame[i].item() if isinstance(start_frame, torch.Tensor) else start_frame
+        x_i = torch.view_as_complex(
+            x[i, :seq_len].to(torch.float64).reshape(seq_len, n, -1, 2)
+        )
+        freqs_i = _get_causal_rope_freqs(freqs_source, freqs, f, h, w, sf, x.device)
 
-        # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(
-            seq_len, n, -1, 2))
-        freqs_i = torch.cat([
-            freqs[0][sf:sf + f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-            dim=-1).reshape(seq_len, 1, -1)
+        output[i, :seq_len] = torch.view_as_real(x_i * freqs_i).flatten(2).type_as(x)
 
-        # apply rotary embedding
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
-
-        # append to collection
-        output.append(x_i)
-    return torch.stack(output).type_as(x)
+    return output
 
 
 def attention_with_kvcache_fallback(q, k_cache, v_cache, cache_seqlens):
