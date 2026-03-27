@@ -8,9 +8,20 @@ version = "0.1.0"
 description = "StreamDiffusionV2 offline and online video diffusion inference."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
   { name = "StreamDiffusionV2 Contributors" }
+]
+keywords = ["video-diffusion", "streaming-inference", "wan", "fastapi"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
   "accelerate==1.10.1",
@@ -35,6 +46,16 @@ dependencies = [
   "transformers==4.54.0",
   "uvicorn==0.37.0",
 ]
+
+[project.urls]
+Homepage = "https://streamdiffusionv2.github.io/"
+Repository = "https://github.com/chenfengxu714/StreamDiffusionV2"
+Issues = "https://github.com/chenfengxu714/StreamDiffusionV2/issues"
+
+[project.scripts]
+streamdiffusionv2-single = "streamv2v.inference:main"
+streamdiffusionv2-single-wo = "streamv2v.inference_wo_batch:main"
+streamdiffusionv2-pipe = "streamv2v.inference_pipe:main"
 
 [project.optional-dependencies]
 "flash-attn" = [
