@@ -19,6 +19,7 @@
 StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time streaming applications. It scales across diverse GPU setups, supports flexible denoising steps, and delivers high FPS for creators and platforms. Further details are available on our project [homepage](https://streamdiffusionv2.github.io/).
 
 ## News
+- **[2026-03-27]** StreamDiffusionV2 is now available on [PyPI](https://pypi.org/project/streamdiffusionv2/). Install the environment via `pip install streamdiffusionv2`.
 - **[2026-03-27]** Added optional TAEHV-VAE support for offline and online inference via `--use_taehv` and `USE_TAEHV=1`.
 - **[2026-03-06]** Update Ring-buffer KV Cache for efficient sliding window attention.
 - **[2026-01-26]** 🎉 [StreamDiffusionV2](https://arxiv.org/abs/2511.07399) is accepted by MLSys 2026!
@@ -34,7 +35,7 @@ StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time
 ## Installation
 
 ```shell
-conda create -n streamdiffusionv2 python=3.10
+conda create -n streamdiffusionv2 python=3.10 -y
 conda activate streamdiffusionv2
 
 # PyPI
