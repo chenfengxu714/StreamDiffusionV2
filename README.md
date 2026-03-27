@@ -34,16 +34,28 @@ StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time
 ## Installation
 
 ```shell
-conda create -n stream python=3.10.0
-conda activate stream
-# Require CUDA 12.4 or above, please check via `nvcc -V`
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
+conda create -n streamdiffusionv2 python=3.10
+conda activate streamdiffusionv2
+
+# PyPI
+pip install streamdiffusionv2
+
 # Optional but recommended for better throughput
-# The project will fall back to PyTorch attention if FlashAttention is unavailable
-pip install flash_attn==2.7.4.post1 --no-build-isolation
-python setup.py develop
+pip install "streamdiffusionv2[flash-attn]"
 ```
+
+If you are installing from a local checkout of this repository instead of PyPI:
+
+```shell
+conda create -n streamdiffusionv2 python=3.10
+conda activate streamdiffusionv2
+pip install .
+
+# Optional but recommended for better throughput
+pip install ".[flash-attn]"
+```
+
+The package install includes the Python dependencies required for both offline inference and the demo backend. The demo frontend still requires Node.js 18 as described in [demo/README.md](demo/README.md).
 
 ## Download Checkpoints
 

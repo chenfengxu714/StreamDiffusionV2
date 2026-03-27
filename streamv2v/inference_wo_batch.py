@@ -8,10 +8,10 @@ inference pipeline on a single GPU:
 3. VAE decode output video
 """
 
-from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
-from causvid.util import set_seed
+from models.wan.causal_stream_inference import CausalStreamInferencePipeline
+from models.util import set_seed
 from diffusers.utils import export_to_video
-from causvid.data import TextDataset
+from models.data import TextDataset
 import argparse
 import torch
 import os

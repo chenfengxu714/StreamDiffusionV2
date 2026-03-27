@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamdiffusionv2"
+version = "0.1.0"
+description = "StreamDiffusionV2 offline and online video diffusion inference."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { file = "LICENSE" }
+authors = [
+  { name = "StreamDiffusionV2 Contributors" }
+]
+dependencies = [
+  "accelerate==1.10.1",
+  "av==13.1.0",
+  "diffusers==0.35.1",
+  "einops==0.8.1",
+  "fastapi==0.117.1",
+  "ftfy==6.3.1",
+  "imageio==2.37.0",
+  "imageio-ffmpeg==0.6.0",
+  "markdown2==2.5.4",
+  "numpy==1.24.4",
+  "omegaconf==2.3.0",
+  "Pillow==10.1.0",
+  "pydantic==2.10.6",
+  "regex==2024.11.6",
+  "scikit-image==0.25.2",
+  "sentencepiece==0.2.0",
+  "torch==2.6.0",
+  "torchaudio==2.6.0",
+  "torchvision==0.21.0",
+  "transformers==4.54.0",
+  "uvicorn==0.37.0",
+]
+
+[project.optional-dependencies]
+"flash-attn" = [
+  "flash_attn==2.7.4.post1",
+]
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["models*", "streamv2v*"]

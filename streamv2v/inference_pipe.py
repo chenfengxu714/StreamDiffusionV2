@@ -5,10 +5,10 @@ This is a refactored version of inference_pipe_multi.py that uses the new
 communication abstraction layers for better code organization and maintainability.
 """
 
-from causvid.models.wan.causal_stream_inference import CausalStreamInferencePipeline
-from causvid.util import set_seed
+from models.wan.causal_stream_inference import CausalStreamInferencePipeline
+from models.util import set_seed
 from diffusers.utils import export_to_video
-from causvid.data import TextDataset
+from models.data import TextDataset
 import argparse
 from dataclasses import dataclass
 import torch
