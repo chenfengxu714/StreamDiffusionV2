@@ -14,7 +14,7 @@ from util import clear_queue, get_num_transformer_blocks, read_images_from_queue
 import torch
 import torch.distributed as dist
 
-from vid2vid import Pipeline, report_worker_error, wait_for_processes_ready
+from vid2vid import Pipeline, report_worker_error, set_config_value, wait_for_processes_ready
 
 
 class MultiGPUPipeline(Pipeline):
@@ -31,24 +31,25 @@ class MultiGPUPipeline(Pipeline):
         self.stop_event = Event()
         self.restart_event = Event()
         self.error_queue = Queue()
-        self.prompt_dict = Manager().dict()
-        self.prompt_dict["prompt"] = self.prompt
+        self.runtime_state = Manager().dict()
+        self.runtime_state["prompt"] = self.prompt
+        self.runtime_state["use_taehv"] = bool(getattr(self.args, "use_taehv", False))
         self.p_input = Process(
             target=input_process,
-            args=(0, self.total_block_num, self.total_blocks, self.args, self.prompt_dict, self.prepare_events[0], self.restart_event, self.stop_event, self.input_queue, self.error_queue),
+            args=(0, self.total_block_num, self.total_blocks, self.args, self.runtime_state, self.prepare_events[0], self.restart_event, self.stop_event, self.input_queue, self.error_queue),
             daemon=True,
         )
         self.p_middles = [
             Process(
                 target=middle_process,
-                args=(i, self.total_block_num, self.total_blocks, self.args, self.prompt_dict, self.prepare_events[i], self.stop_event, self.error_queue),
+                args=(i, self.total_block_num, self.total_blocks, self.args, self.runtime_state, self.prepare_events[i], self.stop_event, self.error_queue),
                 daemon=True,
             )
             for i in range(1, self.args.num_gpus - 1)
         ]
         self.p_output = Process(
             target=output_process,
-            args=(self.args.num_gpus - 1, self.total_block_num, self.total_blocks, self.args, self.prompt_dict, self.prepare_events[-1], self.stop_event, self.output_queue, self.error_queue),
+            args=(self.args.num_gpus - 1, self.total_block_num, self.total_blocks, self.args, self.runtime_state, self.prepare_events[-1], self.stop_event, self.output_queue, self.error_queue),
             daemon=True,
         )
         self.processes = [self.p_input] + self.p_middles + [self.p_output]
@@ -63,7 +64,16 @@ class MultiGPUPipeline(Pipeline):
         )
 
 
-def input_process(rank, block_num, total_blocks, args, prompt_dict, prepare_event, restart_event, stop_event, input_queue, error_queue):
+def _rebuild_pipeline_for_taehv(args, device, rank, world_size, current_manager, requested_use_taehv: bool):
+    if current_manager is not None:
+        current_manager.logger.info("Rebuilding demo rank %s for use_taehv=%s", rank, requested_use_taehv)
+        del current_manager
+        torch.cuda.empty_cache()
+    set_config_value(args, "use_taehv", requested_use_taehv)
+    return prepare_pipeline(args, device, rank, world_size)
+
+
+def input_process(rank, block_num, total_blocks, args, runtime_state, prepare_event, restart_event, stop_event, input_queue, error_queue):
     torch.set_grad_enabled(False)
     try:
         device = resolve_worker_device(args.gpu_ids, rank)
@@ -71,12 +81,14 @@ def input_process(rank, block_num, total_blocks, args, prompt_dict, prepare_even
         init_dist_tcp(rank, args.num_gpus, device=device)
         block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
+        current_use_taehv = bool(runtime_state.get("use_taehv", getattr(args, "use_taehv", False)))
+        set_config_value(args, "use_taehv", current_use_taehv)
         pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
         num_steps = len(pipeline_manager.pipeline.denoising_step_list)
         chunk_size = pipeline_manager.get_demo_chunk_size()
         first_batch_num_frames = pipeline_manager.get_demo_first_batch_num_frames()
         is_running = False
-        prompt = prompt_dict["prompt"]
+        prompt = runtime_state["prompt"]
         schedule_block = args.schedule_block
 
         torch.cuda.memory._record_memory_history(max_entries=100000)
@@ -84,11 +96,35 @@ def input_process(rank, block_num, total_blocks, args, prompt_dict, prepare_even
         prepare_event.set()
 
         while not stop_event.is_set():
-            if is_running and (prompt_dict["prompt"] != prompt or restart_event.is_set()):
+            requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
+            if requested_use_taehv != current_use_taehv:
+                if is_running and "session" in locals() and "denoised_pred" in locals() and "patched_x_shape" in locals():
+                    pipeline_manager.send_demo_input_prompt_update(
+                        prompt=runtime_state["prompt"],
+                        device=device,
+                        num_steps=num_steps,
+                        chunk_idx=session.chunk_idx,
+                        denoised_pred=denoised_pred,
+                        patched_x_shape=patched_x_shape,
+                        current_step=session.current_step,
+                    )
+                current_use_taehv = requested_use_taehv
+                pipeline_manager = _rebuild_pipeline_for_taehv(args, device, rank, args.num_gpus, pipeline_manager, current_use_taehv)
+                num_steps = len(pipeline_manager.pipeline.denoising_step_list)
+                chunk_size = pipeline_manager.get_demo_chunk_size()
+                first_batch_num_frames = pipeline_manager.get_demo_first_batch_num_frames()
+                prompt = runtime_state["prompt"]
+                schedule_block = args.schedule_block
+                is_running = False
+                clear_queue(input_queue)
+                restart_event.clear()
+                continue
+
+            if is_running and (runtime_state["prompt"] != prompt or restart_event.is_set()):
                 if restart_event.is_set():
                     clear_queue(input_queue)
                     restart_event.clear()
-                prompt = prompt_dict["prompt"]
+                prompt = runtime_state["prompt"]
                 pipeline_manager.send_demo_input_prompt_update(
                     prompt=prompt,
                     device=device,
@@ -182,7 +218,7 @@ def input_process(rank, block_num, total_blocks, args, prompt_dict, prepare_even
         raise
 
 
-def output_process(rank, block_num, total_blocks, args, prompt_dict, prepare_event, stop_event, output_queue, error_queue):
+def output_process(rank, block_num, total_blocks, args, runtime_state, prepare_event, stop_event, output_queue, error_queue):
     torch.set_grad_enabled(False)
     try:
         device = resolve_worker_device(args.gpu_ids, rank)
@@ -190,9 +226,11 @@ def output_process(rank, block_num, total_blocks, args, prompt_dict, prepare_eve
         init_dist_tcp(rank, args.num_gpus, device=device)
         block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
+        current_use_taehv = bool(runtime_state.get("use_taehv", getattr(args, "use_taehv", False)))
+        set_config_value(args, "use_taehv", current_use_taehv)
         pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
         num_steps = len(pipeline_manager.pipeline.denoising_step_list)
-        prompt = prompt_dict["prompt"]
+        prompt = runtime_state["prompt"]
         is_running = False
         need_update_prompt = False
         schedule_block = args.schedule_block
@@ -204,6 +242,18 @@ def output_process(rank, block_num, total_blocks, args, prompt_dict, prepare_eve
                 is_running = False
                 need_update_prompt = False
                 outstanding = []
+
+            requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
+            if requested_use_taehv != current_use_taehv:
+                current_use_taehv = requested_use_taehv
+                pipeline_manager = _rebuild_pipeline_for_taehv(args, device, rank, args.num_gpus, pipeline_manager, current_use_taehv)
+                num_steps = len(pipeline_manager.pipeline.denoising_step_list)
+                prompt = runtime_state["prompt"]
+                schedule_block = args.schedule_block
+                is_running = False
+                need_update_prompt = False
+                clear_queue(output_queue)
+                continue
 
             if not is_running:
                 pipeline_manager.logger.info(f"Initializing rank {rank} first batch")
@@ -267,7 +317,7 @@ def output_process(rank, block_num, total_blocks, args, prompt_dict, prepare_eve
         raise
 
 
-def middle_process(rank, block_num, total_blocks, args, prompt_dict, prepare_event, stop_event, error_queue):
+def middle_process(rank, block_num, total_blocks, args, runtime_state, prepare_event, stop_event, error_queue):
     torch.set_grad_enabled(False)
     try:
         device = resolve_worker_device(args.gpu_ids, rank)
@@ -275,9 +325,11 @@ def middle_process(rank, block_num, total_blocks, args, prompt_dict, prepare_eve
         init_dist_tcp(rank, args.num_gpus, device=device)
         block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
+        current_use_taehv = bool(runtime_state.get("use_taehv", getattr(args, "use_taehv", False)))
+        set_config_value(args, "use_taehv", current_use_taehv)
         pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
         num_steps = len(pipeline_manager.pipeline.denoising_step_list)
-        prompt = prompt_dict["prompt"]
+        prompt = runtime_state["prompt"]
         is_running = False
         need_update_prompt = False
         schedule_block = args.schedule_block
@@ -297,6 +349,17 @@ def middle_process(rank, block_num, total_blocks, args, prompt_dict, prepare_eve
                 is_running = False
                 need_update_prompt = False
                 outstanding = []
+
+            requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
+            if requested_use_taehv != current_use_taehv:
+                current_use_taehv = requested_use_taehv
+                pipeline_manager = _rebuild_pipeline_for_taehv(args, device, rank, args.num_gpus, pipeline_manager, current_use_taehv)
+                num_steps = len(pipeline_manager.pipeline.denoising_step_list)
+                prompt = runtime_state["prompt"]
+                schedule_block = args.schedule_block
+                is_running = False
+                need_update_prompt = False
+                continue
 
             if not is_running:
                 pipeline_manager.logger.info(f"Initializing rank {rank} first batch")

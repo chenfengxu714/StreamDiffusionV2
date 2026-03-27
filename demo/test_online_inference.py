@@ -62,6 +62,20 @@ class FakeEvent:
         return self._is_set
 
 
+class FakeQueue:
+    def __init__(self):
+        self.items = []
+
+    def put(self, item):
+        self.items.append(item)
+
+    def get(self):
+        return self.items.pop(0)
+
+    def qsize(self):
+        return len(self.items)
+
+
 class OnlineInferenceTests(unittest.TestCase):
     def test_input_params_accept_upload_mode_fields(self):
         params = Pipeline.InputParams(input_mode="upload", upload_mode=True)
@@ -69,6 +83,11 @@ class OnlineInferenceTests(unittest.TestCase):
 
         self.assertEqual(namespace.input_mode, "upload")
         self.assertTrue(namespace.upload_mode)
+
+    def test_input_params_accept_use_taehv(self):
+        params = Pipeline.InputParams(use_taehv=True)
+        namespace = Pipeline.params_to_namespace(params)
+        self.assertTrue(namespace.use_taehv)
 
     def test_camera_frame_bytes_decode_to_image(self):
         image = bytes_to_pil(make_jpeg_bytes(size=(6, 4)))
@@ -150,6 +169,19 @@ class OnlineInferenceTests(unittest.TestCase):
         self.assertEqual(pipeline.total_blocks, 40)
         self.assertEqual(pipeline.total_block_num, [[0, 20], [20, 40]])
         self.assertEqual(len(pipeline.processes), 2)
+
+    def test_accept_new_params_updates_runtime_taehv_and_requests_restart(self):
+        pipeline = Pipeline.__new__(Pipeline)
+        pipeline.prompt = "prompt"
+        pipeline.runtime_state = {"prompt": "prompt", "use_taehv": False}
+        pipeline.restart_event = FakeEvent()
+        pipeline.output_queue = FakeQueue()
+        pipeline.input_queue = FakeQueue()
+
+        pipeline.accept_new_params(Pipeline.InputParams(use_taehv=True))
+
+        self.assertTrue(pipeline.runtime_state["use_taehv"])
+        self.assertTrue(pipeline.restart_event.is_set())
 
 
 if __name__ == "__main__":

@@ -48,6 +48,37 @@ video-to-video pipeline with a MJPEG stream server.
 </p>
 """
 
+
+def set_config_value(config, key: str, value) -> None:
+    if isinstance(config, dict):
+        config[key] = value
+        return
+    setattr(config, key, value)
+
+
+def sync_pydantic_field_default(model_cls, field_name: str, value) -> None:
+    if hasattr(model_cls, "model_fields") and field_name in model_cls.model_fields:
+        model_cls.model_fields[field_name].default = value
+    if hasattr(model_cls, "__fields__") and field_name in model_cls.__fields__:
+        model_cls.__fields__[field_name].default = value
+
+
+def build_single_gpu_pipeline_manager(args, device: torch.device):
+    mode_info = select_stream_execution_mode(args, device)
+    pipeline_cls = (
+        StreamBatchInferencePipeline
+        if mode_info["mode"] == "stream_batch"
+        else StreamNoBatchInferencePipeline
+    )
+    pipeline_manager = pipeline_cls(args, device)
+    pipeline_manager.load_model(args.checkpoint_folder)
+    pipeline_manager.logger.info(
+        "Online single-GPU worker selected mode=%s, use_taehv=%s",
+        mode_info["mode"],
+        bool(getattr(args, "use_taehv", False)),
+    )
+    return pipeline_manager, mode_info
+
 class Pipeline:
     class Info(BaseModel):
         name: str = "StreamV2V"
@@ -86,10 +117,19 @@ class Pipeline:
             hide=True,
             id="upload_mode",
         )
+        use_taehv: bool = Field(
+            default=False,
+            title="Use TAEHV VAE",
+            description="Use the lightweight TAEHV decoder for online inference",
+            field="checkbox",
+            hide=True,
+            id="use_taehv",
+        )
 
     def __init__(self, args):
         torch.set_grad_enabled(False)
 
+        sync_pydantic_field_default(self.InputParams, "use_taehv", bool(getattr(args, "use_taehv", False)))
         params = self.InputParams()
         config = merge_cli_config(args.config_path, args._asdict())
         config["height"] = params.height
@@ -106,13 +146,14 @@ class Pipeline:
         self.stop_event = Event()
         self.restart_event = Event()
         self.error_queue = Queue()
-        self.prompt_dict = Manager().dict()
-        self.prompt_dict["prompt"] = self.prompt
+        self.runtime_state = Manager().dict()
+        self.runtime_state["prompt"] = self.prompt
+        self.runtime_state["use_taehv"] = bool(getattr(self.args, "use_taehv", False))
         self.process = Process(
             target=generate_process,
             args=(
                 self.args,
-                self.prompt_dict,
+                self.runtime_state,
                 self.prepare_event,
                 self.restart_event,
                 self.stop_event,
@@ -137,7 +178,14 @@ class Pipeline:
 
         if hasattr(params, "prompt") and params.prompt and self.prompt != params.prompt:
             self.prompt = params.prompt
-            self.prompt_dict["prompt"] = self.prompt
+            self.runtime_state["prompt"] = self.prompt
+
+        if hasattr(params, "use_taehv"):
+            requested_use_taehv = bool(params.use_taehv)
+            if requested_use_taehv != bool(self.runtime_state.get("use_taehv", False)):
+                self.runtime_state["use_taehv"] = requested_use_taehv
+                self.restart_event.set()
+                clear_queue(self.output_queue)
 
         if hasattr(params, "restart") and params.restart:
             self.restart_event.set()
@@ -200,33 +248,45 @@ def report_worker_error(error_queue, worker_name: str) -> None:
     error_queue.put((worker_name, traceback.format_exc()))
 
 
-def generate_process(args, prompt_dict, prepare_event, restart_event, stop_event, input_queue, output_queue, error_queue):
+def generate_process(args, runtime_state, prepare_event, restart_event, stop_event, input_queue, output_queue, error_queue):
     torch.set_grad_enabled(False)
     try:
         device = resolve_worker_device(args.gpu_ids, rank=0)
         torch.cuda.set_device(device)
 
-        mode_info = select_stream_execution_mode(args, device)
-        pipeline_cls = (
-            StreamBatchInferencePipeline
-            if mode_info["mode"] == "stream_batch"
-            else StreamNoBatchInferencePipeline
-        )
-        pipeline_manager = pipeline_cls(args, device)
-        pipeline_manager.load_model(args.checkpoint_folder)
-        pipeline_manager.logger.info("Online single-GPU worker selected mode=%s", mode_info["mode"])
+        current_use_taehv = bool(runtime_state.get("use_taehv", getattr(args, "use_taehv", False)))
+        set_config_value(args, "use_taehv", current_use_taehv)
+        pipeline_manager, _ = build_single_gpu_pipeline_manager(args, device)
         chunk_size = pipeline_manager.base_chunk_size * args.num_frame_per_block
         first_batch_num_frames = 1 + chunk_size
         is_running = False
-        prompt = prompt_dict["prompt"]
+        prompt = runtime_state["prompt"]
         session = None
 
         prepare_event.set()
 
         while not stop_event.is_set():
+            requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
+            if requested_use_taehv != current_use_taehv:
+                pipeline_manager.logger.info("Rebuilding online single-GPU worker for use_taehv=%s", requested_use_taehv)
+                current_use_taehv = requested_use_taehv
+                set_config_value(args, "use_taehv", current_use_taehv)
+                clear_queue(input_queue)
+                clear_queue(output_queue)
+                del pipeline_manager
+                torch.cuda.empty_cache()
+                pipeline_manager, _ = build_single_gpu_pipeline_manager(args, device)
+                chunk_size = pipeline_manager.base_chunk_size * args.num_frame_per_block
+                first_batch_num_frames = 1 + chunk_size
+                prompt = runtime_state["prompt"]
+                session = None
+                is_running = False
+                restart_event.clear()
+                continue
+
             # Prepare first batch
-            if not is_running or prompt_dict["prompt"] != prompt or restart_event.is_set():
-                prompt = prompt_dict["prompt"]
+            if not is_running or runtime_state["prompt"] != prompt or restart_event.is_set():
+                prompt = runtime_state["prompt"]
                 if restart_event.is_set():
                     clear_queue(input_queue)
                     restart_event.clear()

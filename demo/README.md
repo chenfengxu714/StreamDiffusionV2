@@ -28,11 +28,30 @@ chmod +x start.sh
 ```
 The script will:
 - Install and build the frontend (`npm install && npm run build` in `demo/frontend`)
-- Launch the backend with `torchrun` on port `7860` and host `0.0.0.0`
+- Launch the backend on port `7860` and host `0.0.0.0`
 
 You can override the runtime configuration through environment variables, for example:
 ```shell
 HOST=0.0.0.0 PORT=7860 GPU_IDS=0 STEP=2 ./start.sh
+```
+
+## Enable TAEHV-VAE
+
+The demo supports the TAEHV decoder for online inference.
+
+1) Download the checkpoint once:
+```shell
+curl -L https://github.com/madebyollin/taehv/raw/main/taew2_1.pth -o ../ckpts/taew2_1.pth
+```
+
+2) Start the demo with `USE_TAEHV=1`:
+```shell
+USE_TAEHV=1 ./start.sh
+```
+
+You can combine it with your normal launch overrides, for example:
+```shell
+HOST=0.0.0.0 PORT=7860 GPU_IDS=0 STEP=2 USE_TAEHV=1 ./start.sh
 ```
 ## Access
 - Local: `http://0.0.0.0:7860` or `http://localhost:7860`
@@ -42,6 +61,10 @@ HOST=0.0.0.0 PORT=7860 GPU_IDS=0 STEP=2 ./start.sh
 - `start.sh` derives `num_gpus` from `GPU_IDS`. To enable multi-GPU inference on a single node or adjust denoising steps, override the environment variables. For example:
 ```shell
 GPU_IDS=0,1 STEP=2 ./start.sh
+```
+With TAEHV enabled:
+```shell
+GPU_IDS=0,1 STEP=2 USE_TAEHV=1 ./start.sh
 ```
 Our model supports denoising steps from 1 to 4 — feel free to set this value as needed.  
 For real-time live-streaming applications, we found that using **2 steps** provides a good balance between speed and quality.
@@ -57,5 +80,6 @@ For real-time live-streaming applications, we found that using **2 steps** provi
   - For remote servers, open the port in firewall/security group.
 - Model errors:
   - Verify that all checkpoints were downloaded and placed in the expected directories.
+  - If `USE_TAEHV=1` is enabled, verify that `ckpts/taew2_1.pth` exists.
 
 For advanced usage and CLI-based inference, see the root `README.md` (single-GPU and multi-GPU inference scripts).

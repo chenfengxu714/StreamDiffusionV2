@@ -355,6 +355,7 @@ def main():
     parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     parser.add_argument("--profile", action="store_true", default=False, help="Enable synchronized throughput logging")
+    parser.add_argument("--use_taehv", action="store_true", default=False, help="Use the lightweight TAEHV VAE for encode/decode")
     args = parser.parse_args()
     
     torch.set_grad_enabled(False)

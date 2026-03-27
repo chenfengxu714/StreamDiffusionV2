@@ -3,6 +3,7 @@ from causvid.models import (
     get_text_encoder_wrapper,
     get_vae_wrapper
 )
+from causvid.models.wan.taehv_wrapper import TAEHVWanVAEWrapper
 from typing import List
 import torch
 import torch.distributed as dist
@@ -22,7 +23,14 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             model_name=self.generator_model_name)(model_type=model_type)
         self.text_encoder = get_text_encoder_wrapper(
             model_name=args.model_name)(model_type=model_type)
-        self.vae = get_vae_wrapper(model_name=args.model_name)(model_type=model_type)
+        if getattr(args, "use_taehv", False):
+            LOGGER.info("Using TAEHV VAE wrapper for Wan inference")
+            self.vae = TAEHVWanVAEWrapper(
+                model_type=model_type,
+                checkpoint_path=getattr(args, "taehv_checkpoint_path", None),
+            )
+        else:
+            self.vae = get_vae_wrapper(model_name=args.model_name)(model_type=model_type)
 
         # Step 2: Initialize all causal hyperparmeters
         self._init_denoising_step_list(args, device)

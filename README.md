@@ -19,6 +19,8 @@
 StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time streaming applications. It scales across diverse GPU setups, supports flexible denoising steps, and delivers high FPS for creators and platforms. Further details are available on our project [homepage](https://streamdiffusionv2.github.io/).
 
 ## News
+- **[2026-03-27]** Added optional TAEHV-VAE support for offline and online inference via `--use_taehv` and `USE_TAEHV=1`.
+- **[2026-03-06]** Update Ring-buffer KV Cache for efficient sliding window attention.
 - **[2026-01-26]** 🎉 [StreamDiffusionV2](https://arxiv.org/abs/2511.07399) is accepted by MLSys 2026!
 - **[2025-11-10]** 🚀 We have released our [paper](https://arxiv.org/abs/2511.07399) at arXiv. Check it for more details!
 - **[2025-10-18]** Release our model checkpoint on [huggingface](https://huggingface.co/jerryfeng/StreamDiffusionV2/).
@@ -56,6 +58,16 @@ huggingface-cli download --resume-download jerryfeng/StreamDiffusionV2 --local-d
 ```
 We use the 14B model from [CausVid-Plus](https://github.com/GoatWu/CausVid-Plus) for offline inference demo.
 
+### Optional: TAEHV-VAE Checkpoint
+
+If you want to enable the lightweight TAEHV decoder, download its checkpoint once:
+
+```shell
+curl -L https://github.com/madebyollin/taehv/raw/main/taew2_1.pth -o ckpts/taew2_1.pth
+```
+
+The offline inference code can also download this file automatically on first use, but keeping it in `ckpts/taew2_1.pth` avoids that extra startup step.
+
 ## Offline Inference
 
 All offline inference entrypoints are unified under `run_v2v.sh`.
@@ -91,6 +103,7 @@ The most important options are:
 - `--height` and `--width`: output resolution
 - `--fps`: target output FPS
 - `--step`: number of denoising steps used during inference
+- `--use_taehv`: use Wan stream encode with the TAEHV decoder for faster VAE decoding
 
 You can pass overrides either as CLI flags or as environment variables. For example:
 
@@ -98,6 +111,7 @@ You can pass overrides either as CLI flags or as environment variables. For exam
 OUTPUT_FOLDER=outputs/run_single ./run_v2v.sh single
 VIDEO_PATH=examples/original.mp4 PROMPT_FILE_PATH=examples/prompt.txt ./run_v2v.sh single-wo
 NPROC_PER_NODE=2 MASTER_PORT=29511 ./run_v2v.sh pipe
+./run_v2v.sh single --use_taehv
 ```
 
 ### Single GPU
@@ -115,6 +129,12 @@ This is the standard offline path when you run on one GPU.
 --width 832 \
 --fps 16 \
 --step 2
+```
+
+To enable the TAEHV decoder in this mode:
+
+```shell
+./run_v2v.sh single --use_taehv
 ```
 
 ### Multi-GPU
@@ -135,6 +155,12 @@ Use this mode when you want to split inference across multiple GPUs.
 # --schedule_block  # optional: enable block scheduling
 ```
 
+To enable the TAEHV decoder in pipeline mode:
+
+```shell
+./run_v2v.sh pipe --use_taehv
+```
+
 Notes:
 
 - `--schedule_block` is optional and can improve throughput on some multi-GPU setups.
@@ -144,6 +170,7 @@ Notes:
 ## Online Inference (Web UI)
 A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo](demo/README.md).
 - Access in a browser after startup: `http://0.0.0.0:7860` or `http://localhost:7860`
+- To enable the TAEHV decoder in the web demo, start it with `USE_TAEHV=1`.
 
 
 ## To-do List

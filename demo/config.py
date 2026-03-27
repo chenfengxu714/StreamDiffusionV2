@@ -20,6 +20,7 @@ class Args(NamedTuple):
     max_outstanding: int
     schedule_block: bool
     model_type: str
+    use_taehv: bool
     enable_metrics: bool
     target_latency: float
     t2v: bool
@@ -86,6 +87,7 @@ parser.add_argument("--gpu_ids", type=str, default="0,1") # id separated by comm
 parser.add_argument("--max_outstanding", type=int, default=2, help="max number of outstanding sends/recv to keep")
 parser.add_argument("--schedule_block", action="store_true", default=False)
 parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
+parser.add_argument("--use_taehv", action="store_true", default=os.getenv("USE_TAEHV", "").lower() in {"1", "true", "yes", "on"}, help="Use the TAEHV decoder for online inference")
 
 # Metrics collection
 parser.add_argument("--enable-metrics", dest="enable_metrics", action="store_true", default=False, help="Enable SLO metrics collection")
