@@ -73,9 +73,10 @@ def build_single_gpu_pipeline_manager(args, device: torch.device):
     pipeline_manager = pipeline_cls(args, device)
     pipeline_manager.load_model(args.checkpoint_folder)
     pipeline_manager.logger.info(
-        "Online single-GPU worker selected mode=%s, use_taehv=%s",
+        "Online single-GPU worker selected mode=%s, use_taehv=%s, use_tensorrt=%s",
         mode_info["mode"],
         bool(getattr(args, "use_taehv", False)),
+        bool(getattr(args, "use_tensorrt", False)),
     )
     return pipeline_manager, mode_info
 
@@ -125,13 +126,22 @@ class Pipeline:
             hide=True,
             id="use_taehv",
         )
+        use_tensorrt: bool = Field(
+            default=False,
+            title="Use TensorRT",
+            description="Enable available TensorRT acceleration paths for online inference",
+            field="checkbox",
+            hide=True,
+            id="use_tensorrt",
+        )
 
     def __init__(self, args):
         torch.set_grad_enabled(False)
 
-        sync_pydantic_field_default(self.InputParams, "use_taehv", bool(getattr(args, "use_taehv", False)))
-        params = self.InputParams()
         config = merge_cli_config(args.config_path, args._asdict())
+        sync_pydantic_field_default(self.InputParams, "use_taehv", bool(getattr(config, "use_taehv", False)))
+        sync_pydantic_field_default(self.InputParams, "use_tensorrt", bool(getattr(config, "use_tensorrt", False)))
+        params = self.InputParams()
         config["height"] = params.height
         config["width"] = params.width
 
@@ -149,6 +159,7 @@ class Pipeline:
         self.runtime_state = Manager().dict()
         self.runtime_state["prompt"] = self.prompt
         self.runtime_state["use_taehv"] = bool(getattr(self.args, "use_taehv", False))
+        self.runtime_state["use_tensorrt"] = bool(getattr(self.args, "use_tensorrt", False))
         self.process = Process(
             target=generate_process,
             args=(
@@ -184,6 +195,13 @@ class Pipeline:
             requested_use_taehv = bool(params.use_taehv)
             if requested_use_taehv != bool(self.runtime_state.get("use_taehv", False)):
                 self.runtime_state["use_taehv"] = requested_use_taehv
+                self.restart_event.set()
+                clear_queue(self.output_queue)
+
+        if hasattr(params, "use_tensorrt"):
+            requested_use_tensorrt = bool(params.use_tensorrt)
+            if requested_use_tensorrt != bool(self.runtime_state.get("use_tensorrt", False)):
+                self.runtime_state["use_tensorrt"] = requested_use_tensorrt
                 self.restart_event.set()
                 clear_queue(self.output_queue)
 
@@ -255,7 +273,9 @@ def generate_process(args, runtime_state, prepare_event, restart_event, stop_eve
         torch.cuda.set_device(device)
 
         current_use_taehv = bool(runtime_state.get("use_taehv", getattr(args, "use_taehv", False)))
+        current_use_tensorrt = bool(runtime_state.get("use_tensorrt", getattr(args, "use_tensorrt", False)))
         set_config_value(args, "use_taehv", current_use_taehv)
+        set_config_value(args, "use_tensorrt", current_use_tensorrt)
         pipeline_manager, _ = build_single_gpu_pipeline_manager(args, device)
         chunk_size = pipeline_manager.base_chunk_size * args.num_frame_per_block
         first_batch_num_frames = 1 + chunk_size
@@ -267,10 +287,17 @@ def generate_process(args, runtime_state, prepare_event, restart_event, stop_eve
 
         while not stop_event.is_set():
             requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
-            if requested_use_taehv != current_use_taehv:
-                pipeline_manager.logger.info("Rebuilding online single-GPU worker for use_taehv=%s", requested_use_taehv)
+            requested_use_tensorrt = bool(runtime_state.get("use_tensorrt", current_use_tensorrt))
+            if requested_use_taehv != current_use_taehv or requested_use_tensorrt != current_use_tensorrt:
+                pipeline_manager.logger.info(
+                    "Rebuilding online single-GPU worker for use_taehv=%s, use_tensorrt=%s",
+                    requested_use_taehv,
+                    requested_use_tensorrt,
+                )
                 current_use_taehv = requested_use_taehv
+                current_use_tensorrt = requested_use_tensorrt
                 set_config_value(args, "use_taehv", current_use_taehv)
+                set_config_value(args, "use_tensorrt", current_use_tensorrt)
                 clear_queue(input_queue)
                 clear_queue(output_queue)
                 del pipeline_manager

@@ -12,6 +12,8 @@ GPU_IDS="${GPU_IDS:-0}"
 STEP="${STEP:-1}"
 MODEL_TYPE="${MODEL_TYPE:-T2V-1.3B}"
 USE_TAEHV="${USE_TAEHV:-0}"
+USE_TENSORRT="${USE_TENSORRT:-0}"
+FAST="${FAST:-0}"
 
 IFS=',' read -r -a GPU_ARRAY <<< "$GPU_IDS"
 LOCAL_GPU_IDS="$(seq 0 $((${#GPU_ARRAY[@]} - 1)) | paste -sd, -)"
@@ -29,6 +31,20 @@ case "$(printf '%s' "$USE_TAEHV" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
+TENSORRT_FLAG=""
+case "$(printf '%s' "$USE_TENSORRT" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    TENSORRT_FLAG="--use_tensorrt"
+    ;;
+esac
+
+FAST_FLAG=""
+case "$(printf '%s' "$FAST" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    FAST_FLAG="--fast"
+    ;;
+esac
+
 CUDA_VISIBLE_DEVICES="$GPU_IDS" python main.py \
   --port "$PORT" \
   --host "$HOST" \
@@ -36,4 +52,6 @@ CUDA_VISIBLE_DEVICES="$GPU_IDS" python main.py \
   --gpu_ids "$LOCAL_GPU_IDS" \
   --step "$STEP" \
   --model_type "$MODEL_TYPE" \
-  $TAEHV_FLAG
+  $TAEHV_FLAG \
+  $TENSORRT_FLAG \
+  $FAST_FLAG

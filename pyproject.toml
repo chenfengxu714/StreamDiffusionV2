@@ -66,4 +66,7 @@ streamdiffusionv2-pipe = "streamv2v.inference_pipe:main"
 include-package-data = false
 
 [tool.setuptools.packages.find]
-include = ["models*", "streamv2v*"]
+include = ["models*", "streamv2v*", "streamdiffusionv2*"]
+
+[tool.setuptools.package-data]
+"streamv2v.configs" = ["*.yaml"]

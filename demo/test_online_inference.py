@@ -89,6 +89,11 @@ class OnlineInferenceTests(unittest.TestCase):
         namespace = Pipeline.params_to_namespace(params)
         self.assertTrue(namespace.use_taehv)
 
+    def test_input_params_accept_use_tensorrt(self):
+        params = Pipeline.InputParams(use_tensorrt=True)
+        namespace = Pipeline.params_to_namespace(params)
+        self.assertTrue(namespace.use_tensorrt)
+
     def test_camera_frame_bytes_decode_to_image(self):
         image = bytes_to_pil(make_jpeg_bytes(size=(6, 4)))
         self.assertEqual(image.size, (6, 4))
@@ -173,7 +178,7 @@ class OnlineInferenceTests(unittest.TestCase):
     def test_accept_new_params_updates_runtime_taehv_and_requests_restart(self):
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.prompt = "prompt"
-        pipeline.runtime_state = {"prompt": "prompt", "use_taehv": False}
+        pipeline.runtime_state = {"prompt": "prompt", "use_taehv": False, "use_tensorrt": False}
         pipeline.restart_event = FakeEvent()
         pipeline.output_queue = FakeQueue()
         pipeline.input_queue = FakeQueue()
@@ -181,6 +186,19 @@ class OnlineInferenceTests(unittest.TestCase):
         pipeline.accept_new_params(Pipeline.InputParams(use_taehv=True))
 
         self.assertTrue(pipeline.runtime_state["use_taehv"])
+        self.assertTrue(pipeline.restart_event.is_set())
+
+    def test_accept_new_params_updates_runtime_tensorrt_and_requests_restart(self):
+        pipeline = Pipeline.__new__(Pipeline)
+        pipeline.prompt = "prompt"
+        pipeline.runtime_state = {"prompt": "prompt", "use_taehv": False, "use_tensorrt": False}
+        pipeline.restart_event = FakeEvent()
+        pipeline.output_queue = FakeQueue()
+        pipeline.input_queue = FakeQueue()
+
+        pipeline.accept_new_params(Pipeline.InputParams(use_tensorrt=True))
+
+        self.assertTrue(pipeline.runtime_state["use_tensorrt"])
         self.assertTrue(pipeline.restart_event.is_set())
 
 

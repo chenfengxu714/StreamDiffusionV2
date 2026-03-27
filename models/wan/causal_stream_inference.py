@@ -28,6 +28,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
             self.vae = TAEHVWanVAEWrapper(
                 model_type=model_type,
                 checkpoint_path=getattr(args, "taehv_checkpoint_path", None),
+                use_tensorrt=getattr(args, "use_tensorrt", False),
             )
         else:
             self.vae = get_vae_wrapper(model_name=args.model_name)(model_type=model_type)

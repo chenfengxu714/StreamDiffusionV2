@@ -47,7 +47,11 @@ except ModuleNotFoundError:
         setup_logging,
         compute_balanced_split
     )
-    from inference_common import load_generator_state_dict, load_mp4_as_tensor, merge_cli_config
+    from inference_common import (
+        load_generator_state_dict,
+        load_mp4_as_tensor,
+        merge_cli_config,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -148,6 +152,8 @@ class InferencePipelineManager:
         self.base_chunk_size = 4
         self.t_refresh = 50
         self.profile = bool(config.get('profile', False))
+        self.encode_fps_list: list[float] = []
+        self.decode_fps_list: list[float] = []
         
         self.logger.info(f"Initialized InferencePipelineManager for rank {rank}")
     
@@ -245,7 +251,7 @@ class InferencePipelineManager:
 
     def _decode_prediction(self, denoised_pred: torch.Tensor) -> np.ndarray:
         """Decode the newest latent prediction into pixel-space frames."""
-        video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred[[-1]])
+        video = self._timed_stream_decode(denoised_pred[[-1]])
         video = (video * 0.5 + 0.5).clamp(0, 1)
         video = video[0].permute(0, 2, 3, 1).contiguous()
         return video.cpu().float().numpy()
@@ -262,6 +268,10 @@ class InferencePipelineManager:
             return 0.0
         return float(np.mean(np.array(values)))
 
+    def _record_stage_fps(self, values: list[float], num_frames: int, elapsed: float) -> None:
+        if self.profile and elapsed > 0 and num_frames > 0:
+            values.append(num_frames / elapsed)
+
     def _timing_enabled(self, schedule_block: bool = False) -> bool:
         """Only force GPU synchronization when profiling or schedule calibration needs it."""
         return self.profile or schedule_block
@@ -269,6 +279,22 @@ class InferencePipelineManager:
     def _sync_for_timing(self, schedule_block: bool = False) -> None:
         if self._timing_enabled(schedule_block):
             torch.cuda.synchronize()
+
+    def _timed_stream_encode(self, images: torch.Tensor) -> torch.Tensor:
+        self._sync_for_timing()
+        start_time = time.time()
+        latents = self.pipeline.vae.stream_encode(images)
+        self._sync_for_timing()
+        self._record_stage_fps(self.encode_fps_list, int(images.shape[2]), time.time() - start_time)
+        return latents
+
+    def _timed_stream_decode(self, denoised_pred: torch.Tensor) -> torch.Tensor:
+        self._sync_for_timing()
+        start_time = time.time()
+        video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+        self._sync_for_timing()
+        self._record_stage_fps(self.decode_fps_list, int(video.shape[1]), time.time() - start_time)
+        return video
 
     def reset_stream_state(self, reset_encode: bool = False, reset_decode: bool = False) -> None:
         """Reset cached inference state before starting a new prompt/session."""
@@ -308,7 +334,7 @@ class InferencePipelineManager:
         self.reset_stream_state(reset_encode=True)
         torch.cuda.empty_cache()
 
-        latents = self.pipeline.vae.stream_encode(images)
+        latents = self._timed_stream_encode(images)
         latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
         noise = torch.randn_like(latents)
         noisy_latents = noise * noise_scale + latents * (1 - noise_scale)
@@ -386,7 +412,7 @@ class InferencePipelineManager:
             init_noise_scale=float(session.init_noise_scale),
         )
 
-        latents = self.pipeline.vae.stream_encode(images)
+        latents = self._timed_stream_encode(images)
         latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
         noise = torch.randn_like(latents)
         session.noisy_latents = noise * session.noise_scale + latents * (1 - session.noise_scale)
@@ -522,7 +548,7 @@ class InferencePipelineManager:
                     input_video_original, end_idx, chunk_size, noise_scale, init_noise_scale
                 )
                 
-                latents = self.pipeline.vae.stream_encode(inp)
+                latents = self._timed_stream_encode(inp)
                 latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
                 
                 noise = torch.randn_like(latents)
@@ -611,7 +637,7 @@ class InferencePipelineManager:
         if 'latent_data' in locals():
             self.data_transfer.release_latent_data(latent_data)
         self._drain_outstanding(outstanding)
-        
+        self.logger.info(f"VAE Encode Average FPS: {self._safe_mean(self.encode_fps_list):.4f}")
         self.logger.info("Rank 0 inference loop completed")
     
     def run_final_rank_loop(self, num_chunks: int, num_steps: int, chunk_size: int,
@@ -707,8 +733,10 @@ class InferencePipelineManager:
                         self._sync_for_timing(schedule_block)
                         start_vae = time.time()
 
-                    video = self._decode_prediction(denoised_pred)
-                    results[save_results] = video
+                    video = self._timed_stream_decode(denoised_pred[[-1]])
+                    video = (video * 0.5 + 0.5).clamp(0, 1)
+                    video = video[0].permute(0, 2, 3, 1).contiguous()
+                    results[save_results] = video.cpu().float().numpy()
 
                     if self._timing_enabled(schedule_block):
                         self._sync_for_timing(schedule_block)
@@ -759,6 +787,7 @@ class InferencePipelineManager:
             video = np.concatenate(video_list, axis=0)
             fps_avg = self._safe_mean(fps_list)
             self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
+            self.logger.info(f"VAE Decode Average FPS: {self._safe_mean(self.decode_fps_list):.4f}")
 
             output_path = os.path.join(output_folder, f"output_{0:03d}.mp4")
             export_to_video(video, output_path, fps=fps)
@@ -841,6 +870,8 @@ def main():
     parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     parser.add_argument("--use_taehv", action="store_true", default=False, help="Use the lightweight TAEHV VAE for encode/decode")
+    parser.add_argument("--use_tensorrt", "--use_taehv_tensorrt", dest="use_tensorrt", action="store_true", default=False, help="Enable available TensorRT acceleration paths")
+    parser.add_argument("--fast", action="store_true", default=False, help="Enable the fast path: --use_taehv --use_tensorrt")
     
     args = parser.parse_args()
     
@@ -915,7 +946,7 @@ def main():
     
     # Only rank 0 performs VAE encoding operation
     if rank == 0:
-        latents = pipeline_manager.pipeline.vae.stream_encode(inp)
+        latents = pipeline_manager._timed_stream_encode(inp)
         latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
         noise = torch.randn_like(latents)
         noisy_latents = noise * args.noise_scale + latents * (1 - args.noise_scale)
@@ -949,7 +980,7 @@ def main():
     # Save initial result for final rank
     if rank == world_size - 1:
         results = {}
-        video = pipeline_manager.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+        video = pipeline_manager._timed_stream_decode(denoised_pred)
         video = (video * 0.5 + 0.5).clamp(0, 1)
         video = video[0].permute(0, 2, 3, 1).contiguous()
         results[0] = video.cpu().float().numpy()

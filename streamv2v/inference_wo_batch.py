@@ -29,7 +29,11 @@ try:
     )
 except ModuleNotFoundError:
     from inference import compute_noise_scale_and_step, SingleGPUStreamSession
-    from inference_common import load_generator_state_dict, load_mp4_as_tensor, merge_cli_config
+    from inference_common import (
+        load_generator_state_dict,
+        load_mp4_as_tensor,
+        merge_cli_config,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,6 +81,8 @@ class SingleGPUInferencePipeline:
         self.base_chunk_size = 4
         self.t_refresh = 50
         self.profile = bool(config.get("profile", False))
+        self.encode_fps_list: list[float] = []
+        self.decode_fps_list: list[float] = []
         
         self.logger.info("Single GPU inference pipeline manager initialized")
     
@@ -110,6 +116,26 @@ class SingleGPUInferencePipeline:
         if self.profile:
             torch.cuda.synchronize()
 
+    def _record_stage_fps(self, values: list[float], num_frames: int, elapsed: float) -> None:
+        if self.profile and elapsed > 0 and num_frames > 0:
+            values.append(num_frames / elapsed)
+
+    def _timed_stream_encode(self, images: torch.Tensor) -> torch.Tensor:
+        self._sync_for_timing()
+        start_time = time.time()
+        latents = self.pipeline.vae.stream_encode(images)
+        self._sync_for_timing()
+        self._record_stage_fps(self.encode_fps_list, int(images.shape[2]), time.time() - start_time)
+        return latents
+
+    def _timed_stream_decode(self, denoised_pred: torch.Tensor) -> torch.Tensor:
+        self._sync_for_timing()
+        start_time = time.time()
+        video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+        self._sync_for_timing()
+        self._record_stage_fps(self.decode_fps_list, int(video.shape[1]), time.time() - start_time)
+        return video
+
     def reset_stream_state(self, reset_vae_flags: bool = True) -> None:
         """Reset cached state before starting a new no-batch stream session."""
         if reset_vae_flags:
@@ -123,7 +149,7 @@ class SingleGPUInferencePipeline:
         self.processed = 0
 
     def _encode_noisy_latents(self, images: torch.Tensor, noise_scale: float) -> torch.Tensor:
-        latents = self.pipeline.vae.stream_encode(images)
+        latents = self._timed_stream_encode(images)
         latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
         noise = torch.randn_like(latents)
         return noise * noise_scale + latents * (1 - noise_scale)
@@ -132,10 +158,10 @@ class SingleGPUInferencePipeline:
         if last_frame_only:
             denoised_pred = denoised_pred[[-1]]
 
-        video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+        video = self._timed_stream_decode(denoised_pred)
         video = (video * 0.5 + 0.5).clamp(0, 1)
         video = video[0].permute(0, 2, 3, 1).contiguous()
-        return video.cpu().float().numpy()
+        return video.detach().cpu().float().numpy()
 
     def start_stream_session(self, prompt: str, images: torch.Tensor, noise_scale: float) -> tuple[SingleGPUStreamSession, np.ndarray]:
         """Initialize a no-batch streaming session and return the first decoded frames."""
@@ -221,6 +247,8 @@ class SingleGPUInferencePipeline:
 
         fps_list = []
         dit_fps_list = []
+        self.encode_fps_list = []
+        self.decode_fps_list = []
         
         # Initialize variables
         start_idx = 0
@@ -237,7 +265,7 @@ class SingleGPUInferencePipeline:
             inp = input_video_original[:, :, start_idx:end_idx]
             
             # VAE encoding
-            latents = self.pipeline.vae.stream_encode(inp)
+            latents = self._timed_stream_encode(inp)
             latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
             
             noise = torch.randn_like(latents)
@@ -253,7 +281,7 @@ class SingleGPUInferencePipeline:
             )
             
             # Save first result - only start decoding after num_steps
-            video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred)
+            video = self._timed_stream_decode(denoised_pred)
             video = (video * 0.5 + 0.5).clamp(0, 1)
             video = video[0].permute(0, 2, 3, 1).contiguous()
             results[save_results] = video.cpu().float().numpy()
@@ -275,7 +303,7 @@ class SingleGPUInferencePipeline:
                 )
                 
                 # VAE encoding
-                latents = self.pipeline.vae.stream_encode(inp)
+                latents = self._timed_stream_encode(inp)
                 latents = latents.transpose(2, 1).contiguous().to(dtype=torch.bfloat16)
                 
                 noise = torch.randn_like(latents)
@@ -303,7 +331,7 @@ class SingleGPUInferencePipeline:
             self.processed += 1
             
             # VAE decoding - only start decoding after num_steps
-            video = self.pipeline.vae.stream_decode_to_pixel(denoised_pred[[-1]])
+            video = self._timed_stream_decode(denoised_pred[[-1]])
             video = (video * 0.5 + 0.5).clamp(0, 1)
             video = video[0].permute(0, 2, 3, 1).contiguous()
             
@@ -326,7 +354,11 @@ class SingleGPUInferencePipeline:
         if self.profile and fps_list:
             fps_avg = np.mean(np.array(fps_list))
             dit_avg = np.mean(np.array(dit_fps_list)) if dit_fps_list else 0.0
+            encode_avg = np.mean(np.array(self.encode_fps_list)) if self.encode_fps_list else 0.0
+            decode_avg = np.mean(np.array(self.decode_fps_list)) if self.decode_fps_list else 0.0
+            self.logger.info(f"VAE Encode Average FPS: {encode_avg:.4f}")
             self.logger.info(f"DiT Average FPS: {dit_avg:.4f}")
+            self.logger.info(f"VAE Decode Average FPS: {decode_avg:.4f}")
             self.logger.info(f"Video shape: {video.shape}, Average FPS: {fps_avg:.4f}")
         else:
             self.logger.info(f"Video shape: {video.shape}")
@@ -352,16 +384,26 @@ def main():
     parser.add_argument("--fps", type=int, default=16, help="Output video fps")
     parser.add_argument("--step", type=int, default=2, help="Step")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--gpu_id", type=int, default=None, help="CUDA device index for single-GPU inference")
     parser.add_argument("--t2v", action="store_true", default=False)
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     parser.add_argument("--profile", action="store_true", default=False, help="Enable synchronized throughput logging")
     parser.add_argument("--use_taehv", action="store_true", default=False, help="Use the lightweight TAEHV VAE for encode/decode")
+    parser.add_argument("--use_tensorrt", "--use_taehv_tensorrt", dest="use_tensorrt", action="store_true", default=False, help="Enable available TensorRT acceleration paths")
+    parser.add_argument("--fast", action="store_true", default=False, help="Enable the fast path: --use_taehv --use_tensorrt")
     args = parser.parse_args()
     
     torch.set_grad_enabled(False)
     
     # Auto-detect device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        if args.gpu_id is not None:
+            torch.cuda.set_device(args.gpu_id)
+            device = torch.device(f"cuda:{args.gpu_id}")
+        else:
+            device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     
     # Load configuration
     config = merge_cli_config(args.config_path, args)

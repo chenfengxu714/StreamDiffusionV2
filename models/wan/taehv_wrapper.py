@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import urllib.request
 from collections import namedtuple
@@ -17,6 +18,12 @@ from models.wan.wan_wrapper import WanVAEWrapper
 
 DecoderResult = namedtuple("DecoderResult", ("frame", "memory"))
 TWorkItem = namedtuple("TWorkItem", ("input_tensor", "block_index"))
+LOGGER = logging.getLogger(__name__)
+
+try:
+    import tensorrt as trt
+except ImportError:
+    trt = None
 
 def _resolve_project_root() -> Path:
     env_root = os.environ.get("STREAMDIFFUSIONV2_ROOT")
@@ -218,6 +225,148 @@ class TAEHV(nn.Module):
         return apply_model_with_memblocks(self.decoder, x, parallel, show_progress_bar)
 
 
+class TAEHVParallelDecoderModule(nn.Module):
+    """Shape-specialized decoder graph that is friendly to ONNX/TensorRT export."""
+
+    def __init__(self, decoder: nn.Module):
+        super().__init__()
+        self.decoder = decoder
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        return apply_model_with_memblocks(
+            self.decoder,
+            latent,
+            parallel=True,
+            show_progress_bar=False,
+        )
+
+
+class TAEHVTensorRTDecoder:
+    """Cache TensorRT engines for the common fixed TAEHV decoder shapes."""
+
+    def __init__(
+        self,
+        decoder_module: nn.Module,
+        cache_dir: str | Path,
+        workspace_bytes: int,
+    ) -> None:
+        if trt is None:
+            raise ImportError("TensorRT is not installed, but TensorRT decode was requested.")
+
+        self.decoder_module = decoder_module.eval()
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.workspace_bytes = int(workspace_bytes)
+        self.logger = trt.Logger(trt.Logger.WARNING)
+        self.runtime = trt.Runtime(self.logger)
+        self._engine_cache: dict[tuple[int, ...], tuple[object, object, str, str]] = {}
+        self._stream_cache: dict[int, torch.cuda.Stream] = {}
+
+    def _shape_tag(self, shape: tuple[int, ...]) -> str:
+        return "x".join(str(dim) for dim in shape)
+
+    def _engine_path(self, shape: tuple[int, ...]) -> Path:
+        return self.cache_dir / f"taehv_decoder_trt_{self._shape_tag(shape)}.plan"
+
+    def _onnx_path(self, shape: tuple[int, ...]) -> Path:
+        return self.cache_dir / f"taehv_decoder_trt_{self._shape_tag(shape)}.onnx"
+
+    def _build_engine(self, shape: tuple[int, ...], device: torch.device) -> bytes:
+        onnx_path = self._onnx_path(shape)
+        engine_path = self._engine_path(shape)
+
+        sample = torch.randn(shape, device=device, dtype=torch.float16)
+        with torch.no_grad():
+            torch.onnx.export(
+                self.decoder_module,
+                (sample,),
+                onnx_path.as_posix(),
+                input_names=["latent"],
+                output_names=["video"],
+                opset_version=18,
+                do_constant_folding=True,
+            )
+
+        builder = trt.Builder(self.logger)
+        network = builder.create_network(
+            1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        )
+        parser = trt.OnnxParser(network, self.logger)
+        with open(onnx_path, "rb") as handle:
+            if not parser.parse(handle.read()):
+                errors = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
+                raise RuntimeError(f"Failed to parse ONNX for TAEHV TensorRT engine:\n{errors}")
+
+        config = builder.create_builder_config()
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, self.workspace_bytes)
+        config.set_flag(trt.BuilderFlag.FP16)
+        serialized = builder.build_serialized_network(network, config)
+        if serialized is None:
+            raise RuntimeError("TensorRT failed to build the TAEHV decoder engine")
+        engine_bytes = bytes(serialized)
+        engine_path.write_bytes(engine_bytes)
+        return engine_bytes
+
+    def _load_engine(self, shape: tuple[int, ...], device: torch.device):
+        cached = self._engine_cache.get(shape)
+        if cached is not None:
+            return cached
+
+        engine_path = self._engine_path(shape)
+        if engine_path.exists():
+            engine_bytes = engine_path.read_bytes()
+        else:
+            LOGGER.info("Building TensorRT engine for TAEHV decoder shape %s", shape)
+            engine_bytes = self._build_engine(shape, device)
+
+        engine = self.runtime.deserialize_cuda_engine(engine_bytes)
+        if engine is None:
+            raise RuntimeError(f"Failed to deserialize TensorRT engine for TAEHV shape {shape}")
+        context = engine.create_execution_context()
+        input_name = ""
+        output_name = ""
+        for index in range(engine.num_io_tensors):
+            name = engine.get_tensor_name(index)
+            mode = engine.get_tensor_mode(name)
+            if mode == trt.TensorIOMode.INPUT:
+                input_name = name
+            elif mode == trt.TensorIOMode.OUTPUT:
+                output_name = name
+        if not input_name or not output_name:
+            raise RuntimeError("Failed to discover TensorRT decoder tensor names")
+
+        cached = (engine, context, input_name, output_name)
+        self._engine_cache[shape] = cached
+        return cached
+
+    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        latent = latent.contiguous().to(dtype=torch.float16)
+        shape = tuple(int(dim) for dim in latent.shape)
+        _engine, context, input_name, output_name = self._load_engine(shape, latent.device)
+
+        if not context.set_input_shape(input_name, shape):
+            raise RuntimeError(f"TensorRT rejected decoder input shape {shape}")
+        output_shape = tuple(int(dim) for dim in context.get_tensor_shape(output_name))
+        output = torch.empty(output_shape, device=latent.device, dtype=latent.dtype)
+
+        context.set_tensor_address(input_name, int(latent.data_ptr()))
+        context.set_tensor_address(output_name, int(output.data_ptr()))
+        device_index = latent.device.index
+        if device_index is None:
+            raise RuntimeError("TensorRT decode requires an explicit CUDA device index")
+        stream = self._stream_cache.get(device_index)
+        if stream is None:
+            stream = torch.cuda.Stream(device=latent.device)
+            self._stream_cache[device_index] = stream
+        current_stream = torch.cuda.current_stream(device=latent.device)
+        stream.wait_stream(current_stream)
+        ok = context.execute_async_v3(stream.cuda_stream)
+        if not ok:
+            raise RuntimeError("TensorRT execution failed for the TAEHV decoder")
+        current_stream.wait_stream(stream)
+        return output
+
+
 class TAEHVWanVAEWrapper(VAEInterface):
     """Wan stream encoder with a TAEHV decoder for faster pixel reconstruction."""
 
@@ -227,15 +376,23 @@ class TAEHVWanVAEWrapper(VAEInterface):
         checkpoint_path: str | None = None,
         auto_download: bool = True,
         parallel_decode: bool = False,
+        use_tensorrt: bool = False,
+        tensorrt_cache_dir: str | None = None,
+        tensorrt_workspace_bytes: int = 4 << 30,
     ):
         super().__init__()
         self.checkpoint_path = checkpoint_path or DEFAULT_TAEHV_CHECKPOINT
-        self.parallel_decode = parallel_decode
+        self.use_tensorrt = use_tensorrt
+        self.parallel_decode = parallel_decode or use_tensorrt
         self.model = SimpleNamespace(first_encode=True, first_decode=True)
         self.decode_context_latents = 3
         self._decode_latent_cache: torch.Tensor | None = None
         self.encoder_vae = WanVAEWrapper(model_type=model_type)
         self.taehv = TAEHV(checkpoint_path=self._resolve_checkpoint(auto_download))
+        self._tensorrt_cache_dir = tensorrt_cache_dir or (PROJECT_ROOT / "ckpts" / "taehv_trt")
+        self._tensorrt_workspace_bytes = int(tensorrt_workspace_bytes)
+        self._tensorrt_decoder: TAEHVTensorRTDecoder | None = None
+        self._tensorrt_failed = False
 
     def _resolve_checkpoint(self, auto_download: bool) -> str:
         if os.path.exists(self.checkpoint_path):
@@ -271,6 +428,12 @@ class TAEHVWanVAEWrapper(VAEInterface):
         if device is not None:
             taehv_kwargs["device"] = device
         self.taehv.to(**taehv_kwargs)
+        if self.use_tensorrt and not self._tensorrt_failed:
+            self._tensorrt_decoder = TAEHVTensorRTDecoder(
+                decoder_module=TAEHVParallelDecoderModule(self.taehv.decoder).to(**taehv_kwargs).eval(),
+                cache_dir=self._tensorrt_cache_dir,
+                workspace_bytes=self._tensorrt_workspace_bytes,
+            )
         return self
 
     def _pixels_to_unit_range(self, video: torch.Tensor) -> torch.Tensor:
@@ -285,8 +448,26 @@ class TAEHVWanVAEWrapper(VAEInterface):
     def _to_ncthw(self, video: torch.Tensor) -> torch.Tensor:
         return video.permute(0, 2, 1, 3, 4).contiguous()
 
+    def _decode_video(self, latent: torch.Tensor) -> torch.Tensor:
+        if self.use_tensorrt and self._tensorrt_decoder is not None and not self._tensorrt_failed:
+            try:
+                return self._tensorrt_decoder.decode(latent)
+            except Exception as exc:
+                self._tensorrt_failed = True
+                self._tensorrt_decoder = None
+                LOGGER.warning(
+                    "TAEHV TensorRT decode failed for shape %s, falling back to PyTorch parallel decode: %s",
+                    tuple(latent.shape),
+                    exc,
+                )
+        return self.taehv.decode_video(
+            latent,
+            parallel=self.parallel_decode,
+            show_progress_bar=False,
+        )
+
     def decode_to_pixel(self, latent: torch.Tensor) -> torch.Tensor:
-        video = self.taehv.decode_video(latent, parallel=self.parallel_decode, show_progress_bar=False)
+        video = self._decode_video(latent)
         return self._unit_range_to_pixels(video)
 
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
@@ -316,11 +497,7 @@ class TAEHVWanVAEWrapper(VAEInterface):
             emitted_latents = latent.shape[1]
 
         self._decode_latent_cache = decode_latent[:, -min(self.decode_context_latents, decode_latent.shape[1]):].detach().clone()
-        video = self.taehv.decode_video(
-            decode_latent,
-            parallel=self.parallel_decode,
-            show_progress_bar=False,
-        )
+        video = self._decode_video(decode_latent)
         if emitted_latents:
             video = video[:, -emitted_latents * 4:, :, :, :]
         else:

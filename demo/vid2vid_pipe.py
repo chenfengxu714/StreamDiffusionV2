@@ -34,6 +34,7 @@ class MultiGPUPipeline(Pipeline):
         self.runtime_state = Manager().dict()
         self.runtime_state["prompt"] = self.prompt
         self.runtime_state["use_taehv"] = bool(getattr(self.args, "use_taehv", False))
+        self.runtime_state["use_tensorrt"] = bool(getattr(self.args, "use_tensorrt", False))
         self.p_input = Process(
             target=input_process,
             args=(0, self.total_block_num, self.total_blocks, self.args, self.runtime_state, self.prepare_events[0], self.restart_event, self.stop_event, self.input_queue, self.error_queue),
@@ -64,12 +65,26 @@ class MultiGPUPipeline(Pipeline):
         )
 
 
-def _rebuild_pipeline_for_taehv(args, device, rank, world_size, current_manager, requested_use_taehv: bool):
+def _rebuild_pipeline_for_runtime_options(
+    args,
+    device,
+    rank,
+    world_size,
+    current_manager,
+    requested_use_taehv: bool,
+    requested_use_tensorrt: bool,
+):
     if current_manager is not None:
-        current_manager.logger.info("Rebuilding demo rank %s for use_taehv=%s", rank, requested_use_taehv)
+        current_manager.logger.info(
+            "Rebuilding demo rank %s for use_taehv=%s, use_tensorrt=%s",
+            rank,
+            requested_use_taehv,
+            requested_use_tensorrt,
+        )
         del current_manager
         torch.cuda.empty_cache()
     set_config_value(args, "use_taehv", requested_use_taehv)
+    set_config_value(args, "use_tensorrt", requested_use_tensorrt)
     return prepare_pipeline(args, device, rank, world_size)
 
 
@@ -82,7 +97,9 @@ def input_process(rank, block_num, total_blocks, args, runtime_state, prepare_ev
         block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
         current_use_taehv = bool(runtime_state.get("use_taehv", getattr(args, "use_taehv", False)))
+        current_use_tensorrt = bool(runtime_state.get("use_tensorrt", getattr(args, "use_tensorrt", False)))
         set_config_value(args, "use_taehv", current_use_taehv)
+        set_config_value(args, "use_tensorrt", current_use_tensorrt)
         pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
         num_steps = len(pipeline_manager.pipeline.denoising_step_list)
         chunk_size = pipeline_manager.get_demo_chunk_size()
@@ -97,7 +114,8 @@ def input_process(rank, block_num, total_blocks, args, runtime_state, prepare_ev
 
         while not stop_event.is_set():
             requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
-            if requested_use_taehv != current_use_taehv:
+            requested_use_tensorrt = bool(runtime_state.get("use_tensorrt", current_use_tensorrt))
+            if requested_use_taehv != current_use_taehv or requested_use_tensorrt != current_use_tensorrt:
                 if is_running and "session" in locals() and "denoised_pred" in locals() and "patched_x_shape" in locals():
                     pipeline_manager.send_demo_input_prompt_update(
                         prompt=runtime_state["prompt"],
@@ -109,7 +127,16 @@ def input_process(rank, block_num, total_blocks, args, runtime_state, prepare_ev
                         current_step=session.current_step,
                     )
                 current_use_taehv = requested_use_taehv
-                pipeline_manager = _rebuild_pipeline_for_taehv(args, device, rank, args.num_gpus, pipeline_manager, current_use_taehv)
+                current_use_tensorrt = requested_use_tensorrt
+                pipeline_manager = _rebuild_pipeline_for_runtime_options(
+                    args,
+                    device,
+                    rank,
+                    args.num_gpus,
+                    pipeline_manager,
+                    current_use_taehv,
+                    current_use_tensorrt,
+                )
                 num_steps = len(pipeline_manager.pipeline.denoising_step_list)
                 chunk_size = pipeline_manager.get_demo_chunk_size()
                 first_batch_num_frames = pipeline_manager.get_demo_first_batch_num_frames()
@@ -227,7 +254,9 @@ def output_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
         block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
         current_use_taehv = bool(runtime_state.get("use_taehv", getattr(args, "use_taehv", False)))
+        current_use_tensorrt = bool(runtime_state.get("use_tensorrt", getattr(args, "use_tensorrt", False)))
         set_config_value(args, "use_taehv", current_use_taehv)
+        set_config_value(args, "use_tensorrt", current_use_tensorrt)
         pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
         num_steps = len(pipeline_manager.pipeline.denoising_step_list)
         prompt = runtime_state["prompt"]
@@ -244,9 +273,19 @@ def output_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
                 outstanding = []
 
             requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
-            if requested_use_taehv != current_use_taehv:
+            requested_use_tensorrt = bool(runtime_state.get("use_tensorrt", current_use_tensorrt))
+            if requested_use_taehv != current_use_taehv or requested_use_tensorrt != current_use_tensorrt:
                 current_use_taehv = requested_use_taehv
-                pipeline_manager = _rebuild_pipeline_for_taehv(args, device, rank, args.num_gpus, pipeline_manager, current_use_taehv)
+                current_use_tensorrt = requested_use_tensorrt
+                pipeline_manager = _rebuild_pipeline_for_runtime_options(
+                    args,
+                    device,
+                    rank,
+                    args.num_gpus,
+                    pipeline_manager,
+                    current_use_taehv,
+                    current_use_tensorrt,
+                )
                 num_steps = len(pipeline_manager.pipeline.denoising_step_list)
                 prompt = runtime_state["prompt"]
                 schedule_block = args.schedule_block
@@ -326,7 +365,9 @@ def middle_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
         block_num = torch.tensor(block_num, dtype=torch.int64, device=device)
 
         current_use_taehv = bool(runtime_state.get("use_taehv", getattr(args, "use_taehv", False)))
+        current_use_tensorrt = bool(runtime_state.get("use_tensorrt", getattr(args, "use_tensorrt", False)))
         set_config_value(args, "use_taehv", current_use_taehv)
+        set_config_value(args, "use_tensorrt", current_use_tensorrt)
         pipeline_manager = prepare_pipeline(args, device, rank, args.num_gpus)
         num_steps = len(pipeline_manager.pipeline.denoising_step_list)
         prompt = runtime_state["prompt"]
@@ -351,9 +392,19 @@ def middle_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
                 outstanding = []
 
             requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
-            if requested_use_taehv != current_use_taehv:
+            requested_use_tensorrt = bool(runtime_state.get("use_tensorrt", current_use_tensorrt))
+            if requested_use_taehv != current_use_taehv or requested_use_tensorrt != current_use_tensorrt:
                 current_use_taehv = requested_use_taehv
-                pipeline_manager = _rebuild_pipeline_for_taehv(args, device, rank, args.num_gpus, pipeline_manager, current_use_taehv)
+                current_use_tensorrt = requested_use_tensorrt
+                pipeline_manager = _rebuild_pipeline_for_runtime_options(
+                    args,
+                    device,
+                    rank,
+                    args.num_gpus,
+                    pipeline_manager,
+                    current_use_taehv,
+                    current_use_tensorrt,
+                )
                 num_steps = len(pipeline_manager.pipeline.denoising_step_list)
                 prompt = runtime_state["prompt"]
                 schedule_block = args.schedule_block

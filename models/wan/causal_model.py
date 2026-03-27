@@ -69,29 +69,36 @@ def _get_causal_rope_freqs(freqs_source, freqs_parts, f, h, w, start_frame, devi
     return rope_freqs
 
 
-def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
-    n, c = x.size(2), x.size(3) // 2
-
-    # split freqs
-    freqs_source = freqs
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+def _prepare_causal_rope_cache(grid_sizes, freqs, start_frame=0):
+    c = freqs.shape[1]
+    freqs_parts = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
     if isinstance(start_frame, torch.Tensor):
         start_frames = start_frame.tolist()
     else:
-        start_frames = [int(start_frame)] * x.size(0)
+        start_frames = [int(start_frame)] * grid_sizes.shape[0]
+
+    rope_cache = []
+    for grid_size, sf in zip(grid_sizes.tolist(), start_frames):
+        f, h, w = grid_size
+        seq_len = f * h * w
+        rope_freqs = _get_causal_rope_freqs(freqs, freqs_parts, f, h, w, sf, freqs.device)
+        rope_cache.append((seq_len, rope_freqs))
+    return rope_cache
+
+
+def causal_rope_apply(x, grid_sizes, freqs, start_frame=0, rope_cache=None):
+    n = x.size(2)
+
+    if rope_cache is None:
+        rope_cache = _prepare_causal_rope_cache(grid_sizes, freqs, start_frame=start_frame)
 
     output = x.clone()
 
-    for i, (grid_size, sf) in enumerate(zip(grid_sizes.tolist(), start_frames)):
-        f, h, w = grid_size
-        seq_len = f * h * w
-
+    for i, (seq_len, freqs_i) in enumerate(rope_cache):
         x_i = torch.view_as_complex(
             x[i, :seq_len].to(torch.float64).reshape(seq_len, n, -1, 2)
         )
-        freqs_i = _get_causal_rope_freqs(freqs_source, freqs, f, h, w, sf, x.device)
-
         output[i, :seq_len] = torch.view_as_real(x_i * freqs_i).flatten(2).type_as(x)
 
     return output
@@ -175,7 +182,18 @@ class CausalWanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs, block_mask, kv_cache=None, current_start=0, current_end=0):
+    def forward(
+        self,
+        x,
+        seq_lens,
+        grid_sizes,
+        freqs,
+        block_mask,
+        kv_cache=None,
+        current_start=0,
+        current_end=0,
+        causal_rope_cache=None,
+    ):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -229,9 +247,19 @@ class CausalWanSelfAttention(nn.Module):
             frame_seqlen = math.prod(grid_sizes[0][1:]).item()
             current_start_frame = current_start // frame_seqlen
             roped_query = causal_rope_apply(
-                q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+                q,
+                grid_sizes,
+                freqs,
+                start_frame=current_start_frame,
+                rope_cache=causal_rope_cache,
+            ).type_as(v)
             roped_key = causal_rope_apply(
-                k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+                k,
+                grid_sizes,
+                freqs,
+                start_frame=current_start_frame,
+                rope_cache=causal_rope_cache,
+            ).type_as(v)
 
             seq_lens = []
             kv_cache_size = kv_cache["k"].shape[1]
@@ -319,12 +347,28 @@ class CausalWanSelfAttention(nn.Module):
             v_cache = kv_cache["v"][:, :max_seq_len]
 
             if FLASH_ATTN_AVAILABLE:
-                x = flash_attn_interface.flash_attn_with_kvcache(
-                    q=roped_query,
-                    k_cache=k_cache,
-                    v_cache=v_cache,
-                    cache_seqlens=seq_lens,
-                )
+                try:
+                    with torch.cuda.device(roped_query.device):
+                        x = flash_attn_interface.flash_attn_with_kvcache(
+                            q=roped_query,
+                            k_cache=k_cache,
+                            v_cache=v_cache,
+                            cache_seqlens=seq_lens,
+                        )
+                except RuntimeError as exc:
+                    if "DeviceType::CUDA" not in str(exc):
+                        raise
+                    warnings.warn(
+                        "flash_attn_with_kvcache failed on the current GPU; "
+                        "falling back to scaled_dot_product_attention.",
+                        stacklevel=2,
+                    )
+                    x = attention_with_kvcache_fallback(
+                        q=roped_query,
+                        k_cache=k_cache,
+                        v_cache=v_cache,
+                        cache_seqlens=seq_lens,
+                    )
             else:
                 warnings.warn(
                     "flash_attn is not installed; falling back to "
@@ -397,7 +441,8 @@ class CausalWanAttentionBlock(nn.Module):
         kv_cache=None,
         crossattn_cache=None,
         current_start=0,
-        current_end=0
+        current_end=0,
+        causal_rope_cache=None,
     ):
         r"""
         Args:
@@ -418,7 +463,7 @@ class CausalWanAttentionBlock(nn.Module):
             (self.norm1(x).unflatten(dim=1, sizes=(num_frames, frame_seqlen))
              * (1 + e[1]) + e[0]).flatten(1, 2),
             seq_lens, grid_sizes,
-            freqs, block_mask, kv_cache, current_start, current_end)
+            freqs, block_mask, kv_cache, current_start, current_end, causal_rope_cache)
 
         # with amp.autocast(dtype=torch.float32):
         x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen))
@@ -754,6 +799,12 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             context_lens=context_lens,
             block_mask=self.block_mask
         )
+        if kv_cache is not None:
+            kwargs["causal_rope_cache"] = _prepare_causal_rope_cache(
+                grid_sizes,
+                self.freqs,
+                start_frame=current_start // math.prod(grid_sizes[0][1:]).item(),
+            )
 
         def create_custom_forward(module):
             def custom_forward(*inputs, **kwargs):

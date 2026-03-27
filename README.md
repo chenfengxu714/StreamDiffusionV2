@@ -20,7 +20,7 @@ StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time
 
 ## News
 - **[2026-03-27]** StreamDiffusionV2 is now available on [PyPI](https://pypi.org/project/streamdiffusionv2/). Install the environment via `pip install streamdiffusionv2`.
-- **[2026-03-27]** Added optional TAEHV-VAE support for offline and online inference via `--use_taehv` and `USE_TAEHV=1`.
+- **[2026-03-27]** Added optional TAEHV-VAE support for inference via `--use_taehv` and `USE_TAEHV=1`.
 - **[2026-03-06]** Update Ring-buffer KV Cache for efficient sliding window attention.
 - **[2026-01-26]** 🎉 [StreamDiffusionV2](https://arxiv.org/abs/2511.07399) is accepted by MLSys 2026!
 - **[2025-11-10]** 🚀 We have released our [paper](https://arxiv.org/abs/2511.07399) at arXiv. Check it for more details!
@@ -80,6 +80,110 @@ curl -L https://github.com/madebyollin/taehv/raw/main/taew2_1.pth -o ckpts/taew2
 ```
 
 The offline inference code can also download this file automatically on first use, but keeping it in `ckpts/taew2_1.pth` avoids that extra startup step.
+
+## Usage Example
+
+We provide a simple example of how to use StreamDiffusionV2. For more detailed examples, please refer to [streamv2v](./streamv2v/) directory.
+
+### Single GPU
+
+```python
+import numpy as np
+
+from streamdiffusionv2 import StreamDiffusionV2Pipeline, export_video, load_video
+
+stream = StreamDiffusionV2Pipeline(
+    checkpoint_folder="ckpts/wan_causal_dmd_v2v",
+    mode="single",
+)
+stream.prepare("A dog walks on the grass, realistic")
+
+video = load_video("examples/original.mp4", height=480, width=832)
+decoded_chunks = []
+noise_scale = stream.noise_scale
+
+for video_chunk in stream.chunk_video(video):
+    encoded_chunk = stream.encode_chunk(
+        video,
+        video_chunk,
+        previous_noise_scale=noise_scale,
+        initial_noise_scale=stream.noise_scale,
+    )
+    noise_scale = encoded_chunk.noise_scale
+    denoised_chunk = stream.denoise_chunk(encoded_chunk)
+    if denoised_chunk is None:
+        continue
+    decoded_chunks.append(stream.decode_chunk(denoised_chunk))
+
+output = np.concatenate(decoded_chunks, axis=0)
+export_video(output, "outputs/python_single.mp4", fps=16)
+```
+
+### Single GPU Without Stream-Batch
+
+```python
+import numpy as np
+
+from streamdiffusionv2 import StreamDiffusionV2Pipeline, export_video, load_video
+
+stream = StreamDiffusionV2Pipeline(
+    checkpoint_folder="ckpts/wan_causal_dmd_v2v",
+    mode="single-wo",
+)
+stream.prepare("A dog walks on the grass, realistic")
+
+video = load_video("examples/original.mp4", height=480, width=832)
+decoded_chunks = []
+noise_scale = stream.noise_scale
+
+for video_chunk in stream.chunk_video(video):
+    encoded_chunk = stream.encode_chunk(
+        video,
+        video_chunk,
+        previous_noise_scale=noise_scale,
+        initial_noise_scale=stream.noise_scale,
+    )
+    noise_scale = encoded_chunk.noise_scale
+    denoised_chunk = stream.denoise_chunk(encoded_chunk)
+    if denoised_chunk is None:
+        continue
+    decoded_chunks.append(stream.decode_chunk(denoised_chunk))
+
+output = np.concatenate(decoded_chunks, axis=0)
+export_video(output, "outputs/python_single_wo.mp4", fps=16)
+```
+
+### Multi-GPU Pipeline
+
+Pipeline-parallel inference still launches multiple worker processes, so the Python API for that mode stays as one imported function:
+
+```python
+from streamdiffusionv2 import run_video_to_video
+
+run_video_to_video(
+    mode="pipe",
+    checkpoint_folder="ckpts/wan_causal_dmd_v2v",
+    video_path="examples/original.mp4",
+    prompt="A dog walks on the grass, realistic",
+    output_path="outputs/python_pipe.mp4",
+    gpu_ids=[0, 1],
+    num_gpus=2,
+)
+```
+
+### Optional Acceleration
+
+The staged API can be reconfigured before `prepare(...)`:
+
+```python
+from streamdiffusionv2 import StreamDiffusionV2Pipeline
+
+stream = StreamDiffusionV2Pipeline(checkpoint_folder="ckpts/wan_causal_dmd_v2v")
+stream.enable_acceleration(fast=True)
+stream.prepare("A dog walks on the grass, realistic")
+```
+
+`fast=True` enables `use_taehv` and `use_tensorrt`, and it automatically switches the default config from `wan_causal_dmd_v2v.yaml` to `wan_causal_dmd_v2v_fast.yaml`.
 
 ## Offline Inference
 
