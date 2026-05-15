@@ -22,7 +22,7 @@ MASTER_PORT="${MASTER_PORT:-29501}"
 case "$MODE" in
   single|batch)
     # Standard single-GPU batched inference.
-    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4}" python -m streamv2v.inference \
+    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" python -m streamv2v.inference \
       --config_path "$ROOT_DIR/$CONFIG_PATH" \
       --checkpoint_folder "$ROOT_DIR/$CHECKPOINT_FOLDER" \
       --output_folder "$ROOT_DIR/$OUTPUT_FOLDER" \
@@ -36,7 +36,7 @@ case "$MODE" in
     ;;
   single-wo|wo|wo-batch)
     # Single-GPU inference without batched denoising.
-    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5}" python -m streamv2v.inference_wo_batch \
+    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" python -m streamv2v.inference_wo_batch \
       --config_path "$ROOT_DIR/$CONFIG_PATH" \
       --checkpoint_folder "$ROOT_DIR/$CHECKPOINT_FOLDER" \
       --output_folder "$ROOT_DIR/$OUTPUT_FOLDER" \
@@ -50,7 +50,7 @@ case "$MODE" in
     ;;
   pipe|parallel)
     # Pipeline-parallel inference across multiple GPUs on one node.
-    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-6,7}" torchrun \
+    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" torchrun \
       --nproc_per_node="${NPROC_PER_NODE:-2}" \
       --master_port="$MASTER_PORT" \
       --module streamv2v.inference_pipe \
