@@ -18,6 +18,9 @@ from vid2vid import Pipeline, report_worker_error, set_config_value, wait_for_pr
 
 
 class MultiGPUPipeline(Pipeline):
+    def reset_for_idle(self):
+        return None
+
     def prepare(self):
         self.total_blocks = get_num_transformer_blocks(self.args)
         self.total_block_num = compute_default_block_distribution(

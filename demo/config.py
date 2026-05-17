@@ -26,6 +26,8 @@ class Args(NamedTuple):
     enable_metrics: bool
     target_latency: float
     t2v: bool
+    online_batching_mode: str
+    online_slo_wait_threshold: float
 
     def pretty_print(self):
         print("\n")
@@ -92,11 +94,30 @@ parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model ty
 parser.add_argument("--use_taehv", action="store_true", default=os.getenv("USE_TAEHV", "").lower() in {"1", "true", "yes", "on"}, help="Use the TAEHV decoder for online inference")
 parser.add_argument("--use_tensorrt", action="store_true", default=os.getenv("USE_TENSORRT", "").lower() in {"1", "true", "yes", "on"}, help="Enable available TensorRT acceleration paths for online inference")
 parser.add_argument("--fast", action="store_true", default=os.getenv("FAST", "").lower() in {"1", "true", "yes", "on"}, help="Enable the fast path: --use_taehv --use_tensorrt")
+parser.add_argument(
+    "--online_batching_mode",
+    choices=("batch", "wo_batch", "auto"),
+    default=os.getenv("ONLINE_BATCHING_MODE", "batch"),
+    help="Online single-GPU batching mode: batch (memory-safe preferred batch), wo_batch, or auto",
+)
+parser.add_argument(
+    "--online_slo_wait_threshold",
+    type=float,
+    default=float(os.getenv("ONLINE_SLO_WAIT_THRESHOLD", "0.5")),
+    help="Queue wait threshold in seconds for online auto batching mode",
+)
 
 # Metrics collection
 parser.add_argument("--enable-metrics", dest="enable_metrics", action="store_true", default=False, help="Enable SLO metrics collection")
 parser.add_argument("--target-latency", dest="target_latency", type=float, default=1.0, help="Target latency in seconds for deadline miss rate calculation (default: 0.5s)")
 parser.add_argument("--t2v", action="store_true", default=False)
+
+def validate_online_batching_config(num_gpus: int, online_batching_mode: str) -> None:
+    if num_gpus > 1 and online_batching_mode != "batch":
+        raise ValueError(
+            "--online_batching_mode=wo_batch and --online_batching_mode=auto are only supported when --num_gpus=1"
+        )
+
 
 parsed_args = vars(parser.parse_args())
 parsed_args["config_path"] = os.path.abspath(parsed_args["config_path"])
@@ -108,5 +129,6 @@ if len(gpu_ids) != parsed_args["num_gpus"]:
         f"--gpu_ids expects {parsed_args['num_gpus']} entries, got {len(gpu_ids)} from '{parsed_args['gpu_ids']}'"
     )
 parsed_args["gpu_ids"] = ",".join(gpu_ids)
+validate_online_batching_config(parsed_args["num_gpus"], parsed_args["online_batching_mode"])
 
 config = Args(**parsed_args)

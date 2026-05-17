@@ -42,23 +42,40 @@ def is_firefox(user_agent: str) -> bool:
     return "Firefox" in user_agent
 
 
-def read_images_from_queue(queue, num_frames_needed, device, stop_event=None):
+def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, return_wait_time: bool = False):
+    wait_start = time.monotonic()
+
     # Wait until we have enough frames
     while queue.qsize() < num_frames_needed:
         if stop_event and stop_event.is_set():
-            return None
+            wait_time = time.monotonic() - wait_start
+            return (None, wait_time) if return_wait_time else None
         time.sleep(0.01)
+    wait_time = time.monotonic() - wait_start
 
     # Read exactly num_frames_needed frames in order (FIFO), don't discard any frames.
     images = []
+    enqueue_times = []
     for _ in range(num_frames_needed):
-        images.append(queue.get())
+        item = queue.get()
+        if (
+            isinstance(item, tuple)
+            and len(item) == 2
+            and isinstance(item[1], (int, float))
+        ):
+            image, enqueue_time = item
+            enqueue_times.append(float(enqueue_time))
+        else:
+            image = item
+        images.append(image)
 
     # Stack images in order (FIFO)
     images = np.stack(images, axis=0)
     images = torch.from_numpy(images).unsqueeze(0)
     images = images.permute(0, 4, 1, 2, 3).to(dtype=torch.bfloat16).to(device=device)
-    return images
+    if enqueue_times:
+        wait_time = max(wait_time, time.monotonic() - min(enqueue_times))
+    return (images, wait_time) if return_wait_time else images
 
 
 def clear_queue(queue):

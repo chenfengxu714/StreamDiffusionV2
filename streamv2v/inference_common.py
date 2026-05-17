@@ -95,12 +95,18 @@ def load_generator_state_dict(checkpoint_folder: str):
     ckpt_path = os.path.join(checkpoint_folder, "model.pt")
     checkpoint = torch.load(ckpt_path, map_location="cpu")
 
+    def add_model_prefix(state_dict):
+        return {
+            key if key.startswith("model.") else f"model.{key}": value
+            for key, value in state_dict.items()
+        }
+
     if isinstance(checkpoint, dict):
         for key in ("generator", "generator_ema", "state_dict"):
             if key in checkpoint:
-                return ckpt_path, checkpoint[key]
+                return ckpt_path, add_model_prefix(checkpoint[key])
 
-    return ckpt_path, checkpoint
+    return ckpt_path, add_model_prefix(checkpoint)
 
 
 def _get_flag(config: Any, key: str, default=False):

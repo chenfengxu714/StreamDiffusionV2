@@ -98,12 +98,17 @@ class ConnectionManager:
     def get_websocket(self, user_id: UUID) -> WebSocket:
         user_session = self.active_connections.get(user_id)
         if user_session:
-            websocket = user_session["websocket"]
-            if websocket.client_state == WebSocketState.CONNECTED:
-                return user_session["websocket"]
+            websocket = user_session.get("websocket")
+            if websocket and websocket.client_state == WebSocketState.CONNECTED:
+                return websocket
         return None
 
-    async def disconnect(self, user_id: UUID, pipeline: Optional["Pipeline"] = None):
+    async def disconnect(
+        self,
+        user_id: UUID,
+        pipeline: Optional["Pipeline"] = None,
+        reset_pipeline: bool = True,
+    ):
         self.logger.info("Disconnecting user: %s", user_id)
         try:
             websocket = self.get_websocket(user_id)
@@ -118,13 +123,24 @@ class ConnectionManager:
                 self.logger.info("User %s removed from connections", user_id)
             except Exception as e:
                 logging.error(f"Error: Exception while clearing data for {user_id}: {e}")
+            if (
+                reset_pipeline
+                and pipeline is not None
+                and self.get_user_count() == 0
+                and hasattr(pipeline, "reset_for_idle")
+            ):
+                try:
+                    pipeline.reset_for_idle()
+                    self.logger.info("Pipeline reset to idle state")
+                except Exception as e:
+                    logging.error(f"Error: Exception while resetting pipeline for idle state: {e}")
 
     async def disconnect_all(self, pipeline: Optional["Pipeline"] = None):
         """Disconnect all users and close pipeline"""
         self.logger.info("Disconnecting all %s users...", len(self.active_connections))
         user_ids = list(self.active_connections.keys())
         for user_id in user_ids:
-            await self.disconnect(user_id, pipeline)
+            await self.disconnect(user_id, pipeline, reset_pipeline=False)
         
         if pipeline:
             try:

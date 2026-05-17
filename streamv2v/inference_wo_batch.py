@@ -83,6 +83,7 @@ class SingleGPUInferencePipeline:
         self.profile = bool(config.get("profile", False))
         self.encode_fps_list: list[float] = []
         self.decode_fps_list: list[float] = []
+        self._canonical_denoising_step_list = self.pipeline.denoising_step_list.clone()
         
         self.logger.info("Single GPU inference pipeline manager initialized")
     
@@ -166,6 +167,7 @@ class SingleGPUInferencePipeline:
     def start_stream_session(self, prompt: str, images: torch.Tensor, noise_scale: float) -> tuple[SingleGPUStreamSession, np.ndarray]:
         """Initialize a no-batch streaming session and return the first decoded frames."""
         self.reset_stream_state(reset_vae_flags=True)
+        self.pipeline.denoising_step_list = self._canonical_denoising_step_list.clone()
 
         chunk_size = self.base_chunk_size * self.pipeline.num_frame_per_block
         current_start = 0
@@ -193,7 +195,7 @@ class SingleGPUInferencePipeline:
         )
         return session, initial_video
 
-    def run_stream_batch(self, session: SingleGPUStreamSession, images: torch.Tensor) -> List[np.ndarray]:
+    def run_stream_batch(self, session: SingleGPUStreamSession, images: torch.Tensor, queue_wait_time: float | None = None) -> List[np.ndarray]:
         """Process one or more chunk-aligned frame groups for an active no-batch stream session."""
         num_frames = images.shape[2]
         input_batch = num_frames // session.chunk_size

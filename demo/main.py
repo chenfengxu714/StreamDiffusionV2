@@ -19,7 +19,7 @@ import signal
 import sys
 from collections import deque
 
-from config import config, Args
+from config import config, Args, validate_online_batching_config
 from util import pil_to_frame, bytes_to_pil, is_firefox
 from connection_manager import ConnectionManager, ServerFullException
 
@@ -683,6 +683,7 @@ if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
 
     config.pretty_print()
+    validate_online_batching_config(config.num_gpus, config.online_batching_mode)
     if config.num_gpus > 1:
         from vid2vid_pipe import MultiGPUPipeline
         pipeline = MultiGPUPipeline(config)

@@ -10,12 +10,31 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import av
 from skimage.metrics import structural_similarity as structural_similarity
-from torchvision.io import read_video
+
+try:
+    from torchvision.io import read_video
+except ImportError:
+    read_video = None
 
 
 def load_video(path: Path) -> tuple[torch.Tensor, dict]:
-    frames, _, info = read_video(str(path), pts_unit="sec", output_format="TCHW")
+    if read_video is not None:
+        frames, _, info = read_video(str(path), pts_unit="sec", output_format="TCHW")
+        return frames.float() / 255.0, info
+
+    decoded_frames = []
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        info = {"video_fps": float(stream.average_rate) if stream.average_rate else None}
+        for frame in container.decode(stream):
+            decoded_frames.append(torch.from_numpy(frame.to_rgb().to_ndarray()))
+
+    if not decoded_frames:
+        raise ValueError(f"No frames decoded from {path}")
+
+    frames = torch.stack(decoded_frames, dim=0).permute(0, 3, 1, 2).contiguous()
     return frames.float() / 255.0, info
 
 
@@ -53,9 +72,11 @@ def main() -> None:
     reference, reference_info = load_video(args.reference)
     candidate, candidate_info = load_video(args.candidate)
 
-    frame_count = min(reference.shape[0], candidate.shape[0])
-    reference = reference[:frame_count]
-    candidate = candidate[:frame_count]
+    if reference.shape[0] != candidate.shape[0]:
+        raise ValueError(
+            f"Video frame counts differ: reference={reference.shape[0]}, candidate={candidate.shape[0]}"
+        )
+    frame_count = reference.shape[0]
 
     frame_psnr = [compute_psnr(reference[i], candidate[i]) for i in range(frame_count)]
     frame_ssim = [compute_ssim(reference[i], candidate[i]) for i in range(frame_count)]

@@ -29,15 +29,16 @@ done
 if [ "$MODEL_TYPE" = "T2V-14B" ]; then
   CONFIG_PATH="${CONFIG_PATH:-configs/wan_causal_dmd_v2v_14b.yaml}"
   CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-ckpts/wan_causal_dmd_v2v_14b}"
+  STEP="${STEP:-1}"
 else
   CONFIG_PATH="${CONFIG_PATH:-configs/wan_causal_dmd_v2v.yaml}"
   CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-ckpts/wan_causal_dmd_v2v}"
+  STEP="${STEP:-2}"
 fi
 OUTPUT_FOLDER="${OUTPUT_FOLDER:-outputs/}"
 HEIGHT="${HEIGHT:-480}"
 WIDTH="${WIDTH:-832}"
 FPS="${FPS:-16}"
-STEP="${STEP:-2}"
 MASTER_PORT="${MASTER_PORT:-29501}"
 
 case "$MODE" in

@@ -214,7 +214,7 @@ class SingleGPUInferencePipeline:
         )
         return session, initial_video
 
-    def run_stream_batch(self, session: SingleGPUStreamSession, images: torch.Tensor) -> List[np.ndarray]:
+    def run_stream_batch(self, session: SingleGPUStreamSession, images: torch.Tensor, queue_wait_time: float | None = None) -> List[np.ndarray]:
         """Process one or more chunk-aligned frame groups for an active streaming session."""
         num_frames = images.shape[2]
         input_batch = num_frames // session.chunk_size

@@ -223,5 +223,6 @@ ckpt/
 ckpts/
 outputs_video/
 outputs/
+scratch/slo_auto_batch/
 wan_models/
 .DS_Store

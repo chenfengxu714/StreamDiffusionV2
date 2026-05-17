@@ -2,8 +2,9 @@
 set -eu
 
 # Build the Svelte frontend, then launch the Python demo backend.
-# Override HOST, PORT, GPU_IDS, STEP, MODEL_TYPE, CONFIG_PATH, and
-# CHECKPOINT_FOLDER via environment variables.
+# Override HOST, PORT, GPU_IDS, STEP, MODEL_TYPE, CONFIG_PATH,
+# CHECKPOINT_FOLDER, ONLINE_BATCHING_MODE, and ONLINE_SLO_WAIT_THRESHOLD via
+# environment variables.
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -11,21 +12,24 @@ PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 PORT="${PORT:-7860}"
 HOST="${HOST:-0.0.0.0}"
 GPU_IDS="${GPU_IDS:-0}"
-STEP="${STEP:-1}"
 MODEL_TYPE="${MODEL_TYPE:-T2V-1.3B}"
 USE_TAEHV="${USE_TAEHV:-0}"
 USE_TENSORRT="${USE_TENSORRT:-0}"
 FAST="${FAST:-0}"
+ONLINE_BATCHING_MODE="${ONLINE_BATCHING_MODE:-batch}"
+ONLINE_SLO_WAIT_THRESHOLD="${ONLINE_SLO_WAIT_THRESHOLD:-0.5}"
 
 case "$MODEL_TYPE" in
   T2V-14B|14B|t2v-14b|14b)
     MODEL_TYPE="T2V-14B"
     CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/configs/wan_causal_dmd_v2v_14b.yaml}"
     CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-$PROJECT_ROOT/ckpts/wan_causal_dmd_v2v_14b}"
+    STEP="${STEP:-1}"
     ;;
   *)
     CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/configs/wan_causal_dmd_v2v.yaml}"
     CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-$PROJECT_ROOT/ckpts/wan_causal_dmd_v2v}"
+    STEP="${STEP:-2}"
     ;;
 esac
 
@@ -68,6 +72,8 @@ CUDA_VISIBLE_DEVICES="$GPU_IDS" python main.py \
   --checkpoint_folder "$CHECKPOINT_FOLDER" \
   --step "$STEP" \
   --model_type "$MODEL_TYPE" \
+  --online_batching_mode "$ONLINE_BATCHING_MODE" \
+  --online_slo_wait_threshold "$ONLINE_SLO_WAIT_THRESHOLD" \
   $TAEHV_FLAG \
   $TENSORRT_FLAG \
   $FAST_FLAG
