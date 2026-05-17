@@ -4,13 +4,13 @@ import torch
 try:
     import flash_attn_interface
     FLASH_ATTN_3_AVAILABLE = True
-except ModuleNotFoundError:
+except (ImportError, ModuleNotFoundError):
     FLASH_ATTN_3_AVAILABLE = False
 
 try:
     import flash_attn
-    FLASH_ATTN_2_AVAILABLE = True
-except ModuleNotFoundError:
+    FLASH_ATTN_2_AVAILABLE = hasattr(flash_attn, "flash_attn_varlen_func")
+except (ImportError, ModuleNotFoundError):
     FLASH_ATTN_2_AVAILABLE = False
 
 import warnings

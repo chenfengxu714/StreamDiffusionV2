@@ -40,8 +40,7 @@ class ConnectionManager:
             "websocket": websocket,
             "queue": asyncio.Queue(),
             "output_queue": asyncio.Queue(),
-            "video_frame_queue": asyncio.Queue(),  # Store all frames from uploaded video
-            "video_frames": [],  # Store original video frame data
+            "video_frame_queue": asyncio.Queue(),  # Frames decoded from uploaded video
             "is_upload_mode": False,  # Flag to indicate upload mode
             "video_upload_completed": False,  # Whether the client has finished uploading
             "video_queue_index": 0,  # Current frame index being played
@@ -205,7 +204,6 @@ class ConnectionManager:
         if not session:
             return
 
-        session["video_frames"] = []
         session["video_queue_index"] = 0
         session["video_total_frames"] = 0
         session["video_upload_completed"] = False
@@ -232,28 +230,14 @@ class ConnectionManager:
     async def add_video_frame(self, user_id: UUID, frame_data: bytes):
         session = self.active_connections.get(user_id)
         if session and session["is_upload_mode"]:
-            # Store original frame data
-            session["video_frames"].append(frame_data)
-            session["video_total_frames"] = len(session["video_frames"])
-            # Add to processing queue
+            session["video_total_frames"] += 1
             await session["video_frame_queue"].put(frame_data)
 
-    # Get next video frame with automatic loop (upload mode only)
+    # Get next uploaded video frame without replay/refill.
     async def get_next_video_frame(self, user_id: UUID) -> bytes:
         session = self.active_connections.get(user_id)
         if not session or not session["is_upload_mode"]:
             return None
-            
-        # If video frame queue is empty, refill with entire video
-        if session["video_frame_queue"].empty() and session["video_frames"]:
-            self.logger.info(
-                "Refilling video queue for user %s, total frames: %s",
-                user_id,
-                session["video_total_frames"],
-            )
-            for frame in session["video_frames"]:
-                await session["video_frame_queue"].put(frame)
-            session["video_queue_index"] = 0
         
         # Get next frame
         if not session["video_frame_queue"].empty():

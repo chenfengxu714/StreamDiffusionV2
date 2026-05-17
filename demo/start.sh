@@ -2,9 +2,11 @@
 set -eu
 
 # Build the Svelte frontend, then launch the Python demo backend.
-# Override HOST, PORT, GPU_IDS, STEP, and MODEL_TYPE via environment variables.
+# Override HOST, PORT, GPU_IDS, STEP, MODEL_TYPE, CONFIG_PATH, and
+# CHECKPOINT_FOLDER via environment variables.
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 
 PORT="${PORT:-7860}"
 HOST="${HOST:-0.0.0.0}"
@@ -14,6 +16,18 @@ MODEL_TYPE="${MODEL_TYPE:-T2V-1.3B}"
 USE_TAEHV="${USE_TAEHV:-0}"
 USE_TENSORRT="${USE_TENSORRT:-0}"
 FAST="${FAST:-0}"
+
+case "$MODEL_TYPE" in
+  T2V-14B|14B|t2v-14b|14b)
+    MODEL_TYPE="T2V-14B"
+    CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/configs/wan_causal_dmd_v2v_14b.yaml}"
+    CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-$PROJECT_ROOT/ckpts/wan_causal_dmd_v2v_14b}"
+    ;;
+  *)
+    CONFIG_PATH="${CONFIG_PATH:-$PROJECT_ROOT/configs/wan_causal_dmd_v2v.yaml}"
+    CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-$PROJECT_ROOT/ckpts/wan_causal_dmd_v2v}"
+    ;;
+esac
 
 IFS=',' read -r -a GPU_ARRAY <<< "$GPU_IDS"
 LOCAL_GPU_IDS="$(seq 0 $((${#GPU_ARRAY[@]} - 1)) | paste -sd, -)"
@@ -50,6 +64,8 @@ CUDA_VISIBLE_DEVICES="$GPU_IDS" python main.py \
   --host "$HOST" \
   --num_gpus "$(printf '%s' "$GPU_IDS" | awk -F',' '{print NF}')" \
   --gpu_ids "$LOCAL_GPU_IDS" \
+  --config_path "$CONFIG_PATH" \
+  --checkpoint_folder "$CHECKPOINT_FOLDER" \
   --step "$STEP" \
   --model_type "$MODEL_TYPE" \
   $TAEHV_FLAG \

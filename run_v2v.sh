@@ -10,8 +10,29 @@ if [ "$#" -gt 0 ]; then
 fi
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
-CONFIG_PATH="${CONFIG_PATH:-configs/wan_causal_dmd_v2v.yaml}"
-CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-ckpts/wan_causal_dmd_v2v}"
+MODEL_TYPE="${MODEL_TYPE:-T2V-1.3B}"
+PREV_ARG=""
+for ARG in "$@"; do
+  if [ "$PREV_ARG" = "--model_type" ]; then
+    MODEL_TYPE="$ARG"
+    break
+  fi
+  case "$ARG" in
+    --model_type=*)
+      MODEL_TYPE="${ARG#--model_type=}"
+      break
+      ;;
+  esac
+  PREV_ARG="$ARG"
+done
+
+if [ "$MODEL_TYPE" = "T2V-14B" ]; then
+  CONFIG_PATH="${CONFIG_PATH:-configs/wan_causal_dmd_v2v_14b.yaml}"
+  CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-ckpts/wan_causal_dmd_v2v_14b}"
+else
+  CONFIG_PATH="${CONFIG_PATH:-configs/wan_causal_dmd_v2v.yaml}"
+  CHECKPOINT_FOLDER="${CHECKPOINT_FOLDER:-ckpts/wan_causal_dmd_v2v}"
+fi
 OUTPUT_FOLDER="${OUTPUT_FOLDER:-outputs/}"
 HEIGHT="${HEIGHT:-480}"
 WIDTH="${WIDTH:-832}"
@@ -32,6 +53,7 @@ case "$MODE" in
       --width "$WIDTH" \
       --fps "$FPS" \
       --step "$STEP" \
+      --model_type "$MODEL_TYPE" \
       "$@"
     ;;
   single-wo|wo|wo-batch)
@@ -46,6 +68,7 @@ case "$MODE" in
       --width "$WIDTH" \
       --fps "$FPS" \
       --step "$STEP" \
+      --model_type "$MODEL_TYPE" \
       "$@"
     ;;
   pipe|parallel)
@@ -63,6 +86,7 @@ case "$MODE" in
       --width "$WIDTH" \
       --fps "$FPS" \
       --step "$STEP" \
+      --model_type "$MODEL_TYPE" \
       "$@"
     ;;
   *)

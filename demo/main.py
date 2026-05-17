@@ -115,21 +115,27 @@ class App:
                     data = await self.conn_manager.receive_json(user_id)
                     # Refresh idle timer on any client control message
                     last_time = time.time()
+                    status = data.get("status") if data else None
                     # Handle stop/pause without closing socket: go idle and wait
-                    if data and data.get("status") == "pause":
+                    if data and status == "pause":
                         params = SimpleNamespace(**{"restart": True})
                         await self.conn_manager.update_data(user_id, params)
                         continue
-                    if data and data.get("status") == "resume":
+                    if data and status == "resume":
+                        await self.conn_manager.send_json(user_id, {"status": "send_frame"})
+                        continue
+                    if data and status == "no_frame":
+                        LOGGER.debug("Camera frame is not ready for user %s; requesting another frame", user_id)
+                        await asyncio.sleep(THROTTLE)
                         await self.conn_manager.send_json(user_id, {"status": "send_frame"})
                         continue
                     # Mark upload completion: after this, don't receive image bytes again
-                    if data and data.get("status") == "upload_done":
+                    if data and status == "upload_done":
                         self.conn_manager.set_video_upload_completed(user_id, True)
                         LOGGER.info("Upload completed for user %s", user_id)
                         await self.conn_manager.send_json(user_id, {"status": "upload_done_ack"})
                         continue
-                    if not data or data.get("status") != "next_frame":
+                    if not data or status != "next_frame":
                         await asyncio.sleep(THROTTLE)
                         continue
 
@@ -140,7 +146,10 @@ class App:
                     
                     # Check if upload mode is enabled
                     is_upload_mode = params.__dict__.get('input_mode') == 'upload' or params.__dict__.get('upload_mode', False)
+                    was_upload_mode = self.conn_manager.get_video_queue_status(user_id).get("is_upload_mode", False)
                     self.conn_manager.set_upload_mode(user_id, is_upload_mode)
+                    if is_upload_mode and not was_upload_mode:
+                        await self.conn_manager.update_data(user_id, SimpleNamespace())
                     if is_upload_mode:
                         LOGGER.debug("Upload mode detected for user %s", user_id)
                     
@@ -171,6 +180,8 @@ class App:
                             if is_upload_mode and not upload_completed:
                                 await self.conn_manager.add_video_frame(user_id, image_data)
                                 LOGGER.debug("Buffered uploaded frame for user %s", user_id)
+                                await self.conn_manager.send_json(user_id, {"status": "send_frame"})
+                                continue
                             # For camera mode, set current image directly
                             if not is_upload_mode:
                                 params.image = bytes_to_pil(image_data)
@@ -282,6 +293,7 @@ class App:
                             # Camera mode: normal processing
                             params = await self.conn_manager.get_latest_data(user_id)
                             if params is None:
+                                LOGGER.info("No input params for user %s; stopping camera pump", user_id)
                                 break
                             if vars(params) and params.__dict__ != last_params.__dict__:
                                 last_params = params

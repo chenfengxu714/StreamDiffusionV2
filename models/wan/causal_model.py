@@ -22,11 +22,15 @@ import torch.distributed as dist
 import warnings
 
 try:
-    from flash_attn import flash_attn_interface
+    import flash_attn_interface
     FLASH_ATTN_AVAILABLE = True
-except ModuleNotFoundError:
-    flash_attn_interface = None
-    FLASH_ATTN_AVAILABLE = False
+except (ImportError, ModuleNotFoundError):
+    try:
+        from flash_attn import flash_attn_interface
+        FLASH_ATTN_AVAILABLE = True
+    except (ImportError, ModuleNotFoundError):
+        flash_attn_interface = None
+        FLASH_ATTN_AVAILABLE = False
 
 # wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
 # see https://github.com/pytorch/pytorch/issues/133254
@@ -295,12 +299,9 @@ class CausalWanSelfAttention(nn.Module):
                         self.evict_idx[i].insert(0, temp_evict_idx)
 
                 # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
-                if current_end > kv_cache_size:
+                if current_end > kv_cache_size or kv_cache["local_end_index"][i]>=kv_cache_size:
                     kv_cache["global_end_index"][i].fill_(c_start)
                     kv_cache["local_end_index"][i].fill_(kv_cache_size)
-
-                if (current_end > kv_cache["global_end_index"][i].item()) and (
-                        num_new_tokens + kv_cache["local_end_index"][i].item() > kv_cache_size):
 
                     target_end = self.evict_idx[i][0]
 

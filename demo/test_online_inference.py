@@ -98,14 +98,13 @@ class OnlineInferenceTests(unittest.TestCase):
         image = bytes_to_pil(make_jpeg_bytes(size=(6, 4)))
         self.assertEqual(image.size, (6, 4))
 
-    def test_repeated_upload_mode_updates_do_not_reset_cached_frames(self):
+    def test_repeated_upload_mode_updates_do_not_reset_upload_queue(self):
         manager = ConnectionManager()
         user_id = uuid.uuid4()
         manager.active_connections[user_id] = {
             "queue": asyncio.Queue(),
             "output_queue": asyncio.Queue(),
             "video_frame_queue": asyncio.Queue(),
-            "video_frames": [],
             "is_upload_mode": False,
             "video_upload_completed": False,
             "video_queue_index": 0,
@@ -119,17 +118,17 @@ class OnlineInferenceTests(unittest.TestCase):
 
         session = manager.active_connections[user_id]
         self.assertTrue(session["is_upload_mode"])
-        self.assertEqual(session["video_frames"], [b"frame-1"])
+        self.assertEqual(session["video_frame_queue"].qsize(), 1)
+        self.assertEqual(session["video_total_frames"], 1)
         self.assertTrue(session["video_upload_completed"])
 
-    def test_upload_queue_loops_cached_video_frames(self):
+    def test_upload_queue_does_not_replay_consumed_frames(self):
         manager = ConnectionManager()
         user_id = uuid.uuid4()
         manager.active_connections[user_id] = {
             "queue": asyncio.Queue(),
             "output_queue": asyncio.Queue(),
             "video_frame_queue": asyncio.Queue(),
-            "video_frames": [],
             "is_upload_mode": True,
             "video_upload_completed": True,
             "video_queue_index": 0,
@@ -145,7 +144,31 @@ class OnlineInferenceTests(unittest.TestCase):
 
         self.assertEqual(first, b"frame-1")
         self.assertEqual(second, b"frame-2")
-        self.assertEqual(third, b"frame-1")
+        self.assertIsNone(third)
+
+    def test_upload_queue_streams_available_frames_before_upload_done(self):
+        manager = ConnectionManager()
+        user_id = uuid.uuid4()
+        manager.active_connections[user_id] = {
+            "queue": asyncio.Queue(),
+            "output_queue": asyncio.Queue(),
+            "video_frame_queue": asyncio.Queue(),
+            "is_upload_mode": True,
+            "video_upload_completed": False,
+            "video_queue_index": 0,
+            "video_total_frames": 0,
+        }
+
+        asyncio.run(manager.add_video_frame(user_id, b"frame-1"))
+
+        first = asyncio.run(manager.get_next_video_frame(user_id))
+        before_done_empty = asyncio.run(manager.get_next_video_frame(user_id))
+        manager.set_video_upload_completed(user_id, True)
+        after_done_empty = asyncio.run(manager.get_next_video_frame(user_id))
+
+        self.assertEqual(first, b"frame-1")
+        self.assertIsNone(before_done_empty)
+        self.assertIsNone(after_done_empty)
 
     def test_multi_gpu_prepare_uses_model_specific_block_count(self):
         pipeline = vid2vid_pipe.MultiGPUPipeline.__new__(vid2vid_pipe.MultiGPUPipeline)

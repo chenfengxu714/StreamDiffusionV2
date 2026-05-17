@@ -28,6 +28,7 @@ export const lcmLiveActions = {
                     websocket.send(JSON.stringify({ status: "resume", timestamp: Date.now() }));
                     streamId.set(userId);
                     resolve({ status: "connected"});
+                    return;
                 } else {
                     websocket = null;
                 }
@@ -60,7 +61,15 @@ export const lcmLiveActions = {
                                 break;
                             }
                             lcmLiveStatus.set(LCMLiveStatus.SEND_FRAME);
-                            const streamData = getSreamdata();
+                            const streamData = getSreamdata().filter((d) => d !== undefined && d !== null);
+                            const hasEmptyBlob = streamData.some((d) => d instanceof Blob && d.size === 0);
+                            if (streamData.length === 0 || hasEmptyBlob) {
+                                websocket?.send(JSON.stringify({
+                                    status: "no_frame",
+                                    timestamp: Date.now()
+                                }));
+                                break;
+                            }
                             websocket?.send(JSON.stringify({ 
                                 status: "next_frame", 
                                 timestamp: Date.now()

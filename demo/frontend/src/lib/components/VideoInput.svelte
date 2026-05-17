@@ -54,6 +54,9 @@
     videoEl.src = '';
     videoEl.load();
     videoEl.srcObject = $mediaStream;
+    if ($mediaStream) {
+      videoEl.play().catch((err) => console.error(err));
+    }
   }
   // Upload mode: bind file
   $: if (videoEl && inputMode === 'upload') {
@@ -157,14 +160,12 @@
 
   function handleVideoEnded() {
     if (inputMode === 'upload') {
-      // For upload mode, keep looping and keep frame extraction active
+      // Upload mode should continue streaming until the user stops it.
       videoEnded = false;
       videoIsReady = true;
       if (videoEl) {
-        // Force restart the video for seamless loop
         videoEl.currentTime = 0;
         videoEl.play();
-        // Restart frame extraction
         videoFrameCallbackId = videoEl.requestVideoFrameCallback(onFrameChange);
       }
       return;
@@ -187,6 +188,7 @@
       <video
         class="pointer-events-none aspect-square w-full object-cover h-full"
         bind:this={videoEl}
+        on:loadedmetadata={() => { videoIsReady = true; }}
         on:loadeddata={() => { videoIsReady = true; }}
         on:ended={inputMode === 'upload' ? handleVideoEnded : undefined}
         playsinline

@@ -3,11 +3,28 @@
 import os
 from typing import Any
 
+import av
+import numpy as np
 import torch
 import torchvision
 import torchvision.transforms.functional as TF
 from einops import rearrange
 from omegaconf import OmegaConf
+
+
+def _read_video_with_av(video_path: str) -> torch.Tensor:
+    """Read a video with PyAV when torchvision's legacy video API is absent."""
+    frames = []
+    with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        for frame in container.decode(stream):
+            frames.append(frame.to_rgb().to_ndarray())
+
+    if not frames:
+        raise ValueError(f"No video frames decoded from {video_path}")
+
+    video = np.stack(frames, axis=0)
+    return torch.from_numpy(video).permute(0, 3, 1, 2).contiguous()
 
 
 def load_mp4_as_tensor(
@@ -19,7 +36,10 @@ def load_mp4_as_tensor(
     """Load an mp4 video as a tensor with shape [C, T, H, W]."""
     assert os.path.exists(video_path), f"Video file not found: {video_path}"
 
-    video, _, _ = torchvision.io.read_video(video_path, output_format="TCHW")
+    if hasattr(torchvision.io, "read_video"):
+        video, _, _ = torchvision.io.read_video(video_path, output_format="TCHW")
+    else:
+        video = _read_video_with_av(video_path)
     if max_frames is not None:
         video = video[:max_frames]
 
