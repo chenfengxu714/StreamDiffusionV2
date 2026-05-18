@@ -22,14 +22,35 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version = "([^"]+)"', text, flags=re.MULTILINE)
+          if match is None:
+              raise SystemExit("Could not find project version in pyproject.toml")
+
+          package_version = match.group(1)
+          tag_version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          if package_version != tag_version:
+              raise SystemExit(
+                  f"Tag v{tag_version} does not match pyproject.toml version {package_version}"
+              )
+          PY
 
       - name: Install build tooling
         run: >-
@@ -44,7 +65,7 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Upload distribution artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: python-package-distributions
           path: dist/
@@ -62,7 +83,7 @@ jobs:
 
     steps:
       - name: Download distribution artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v4
         with:
           name: python-package-distributions
           path: dist/
@@ -85,7 +106,7 @@ jobs:
 
     steps:
       - name: Download distribution artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v4
         with:
           name: python-package-distributions
           path: dist/

@@ -110,6 +110,12 @@ def input_process(rank, block_num, total_blocks, args, runtime_state, prepare_ev
         is_running = False
         prompt = runtime_state["prompt"]
         schedule_block = args.schedule_block
+        session = None
+        images = None
+        denoised_pred = None
+        patched_x_shape = None
+        latent_data = None
+        outstanding = []
 
         torch.cuda.memory._record_memory_history(max_entries=100000)
 
@@ -119,7 +125,7 @@ def input_process(rank, block_num, total_blocks, args, runtime_state, prepare_ev
             requested_use_taehv = bool(runtime_state.get("use_taehv", current_use_taehv))
             requested_use_tensorrt = bool(runtime_state.get("use_tensorrt", current_use_tensorrt))
             if requested_use_taehv != current_use_taehv or requested_use_tensorrt != current_use_tensorrt:
-                if is_running and "session" in locals() and "denoised_pred" in locals() and "patched_x_shape" in locals():
+                if is_running and session is not None and denoised_pred is not None and patched_x_shape is not None:
                     pipeline_manager.send_demo_input_prompt_update(
                         prompt=runtime_state["prompt"],
                         device=device,
@@ -201,7 +207,7 @@ def input_process(rank, block_num, total_blocks, args, runtime_state, prepare_ev
             denoised_pred, patched_x_shape = pipeline_manager.run_demo_input_step(
                 session=session,
                 block_num=block_num[rank],
-                previous_latent_data=latent_data if "latent_data" in locals() else None,
+                previous_latent_data=latent_data,
             )
 
             if schedule_block:
@@ -214,7 +220,7 @@ def input_process(rank, block_num, total_blocks, args, runtime_state, prepare_ev
 
             with torch.cuda.stream(pipeline_manager.com_stream):
                 if pipeline_manager.processed >= pipeline_manager.world_size:
-                    if "latent_data" in locals():
+                    if latent_data is not None:
                         pipeline_manager.data_transfer.release_latent_data(latent_data)
                     latent_data = pipeline_manager.data_transfer.receive_latent_data_async(num_steps)
 
@@ -266,6 +272,9 @@ def output_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
         is_running = False
         need_update_prompt = False
         schedule_block = args.schedule_block
+        latent_data = None
+        denoised_pred = None
+        outstanding = []
         prepare_event.set()
 
         while not stop_event.is_set():
@@ -310,7 +319,7 @@ def output_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
                 outstanding = []
                 pipeline_manager.logger.info(f"Starting rank {rank} inference loop")
 
-            latent_data = pipeline_manager._receive_latent_data(latent_data if "latent_data" in locals() else None, num_steps)
+            latent_data = pipeline_manager._receive_latent_data(latent_data, num_steps)
             if latent_data.chunk_idx == -1:
                 need_update_prompt = True
                 continue
@@ -377,6 +386,9 @@ def middle_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
         is_running = False
         need_update_prompt = False
         schedule_block = args.schedule_block
+        latent_data = None
+        denoised_pred = None
+        outstanding = []
 
         prepare_event.set()
 
@@ -384,12 +396,13 @@ def middle_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
             if need_update_prompt:
                 prompt = pipeline_manager.data_transfer.recv_prompt_async()
                 pipeline_manager.logger.info(f"Rank {rank} sending dummy data")
-                pipeline_manager.send_demo_middle_prompt_update(
-                    prompt=prompt,
-                    device=device,
-                    denoised_pred=denoised_pred,
-                    latent_data=latent_data,
-                )
+                if latent_data is not None:
+                    pipeline_manager.send_demo_middle_prompt_update(
+                        prompt=prompt,
+                        device=device,
+                        denoised_pred=denoised_pred,
+                        latent_data=latent_data,
+                    )
                 is_running = False
                 need_update_prompt = False
                 outstanding = []
@@ -425,7 +438,7 @@ def middle_process(rank, block_num, total_blocks, args, runtime_state, prepare_e
                 outstanding = []
                 pipeline_manager.logger.info(f"Starting rank {rank} inference loop")
 
-            latent_data = pipeline_manager._receive_latent_data(latent_data if "latent_data" in locals() else None, num_steps)
+            latent_data = pipeline_manager._receive_latent_data(latent_data, num_steps)
             if latent_data.chunk_idx == -1:
                 need_update_prompt = True
                 continue

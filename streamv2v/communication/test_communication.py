@@ -5,6 +5,7 @@ This module provides comprehensive tests for all communication abstractions.
 """
 
 import unittest
+import logging
 import torch
 import torch.distributed as dist
 import tempfile

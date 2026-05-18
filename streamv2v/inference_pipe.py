@@ -475,14 +475,15 @@ class InferencePipelineManager:
         self,
         prompt: str,
         device: torch.device,
-        denoised_pred: torch.Tensor,
+        denoised_pred: torch.Tensor | None,
         latent_data,
     ) -> None:
         """Forward a prompt restart from a middle rank to the next rank."""
+        sentinel_source = denoised_pred if denoised_pred is not None else latent_data.latents
         with torch.cuda.stream(self.com_stream):
             self.data_transfer.send_latent_data_async(
                 chunk_idx=-1,
-                latents=denoised_pred.new_zeros([1] * denoised_pred.ndim),
+                latents=sentinel_source.new_zeros([1] * sentinel_source.ndim),
                 original_latents=latent_data.original_latents,
                 patched_x_shape=latent_data.patched_x_shape,
                 current_start=latent_data.current_start,
@@ -526,6 +527,7 @@ class InferencePipelineManager:
         init_noise_scale = noise_scale
         
         outstanding = []
+        latent_data = None
         
         self._sync_for_timing(schedule_block)
         start_time = time.time()
@@ -585,7 +587,7 @@ class InferencePipelineManager:
             
             with torch.cuda.stream(self.com_stream):
                 if self.processed >= self.world_size:
-                    if 'latent_data' in locals():
+                    if latent_data is not None:
                         self.data_transfer.release_latent_data(latent_data)
 
                     # Receive data from previous rank
@@ -634,7 +636,7 @@ class InferencePipelineManager:
             if self.processed + self.processed_offset >= num_chunks + num_steps * self.world_size + self.world_size - self.rank - 1:
                 break
 
-        if 'latent_data' in locals():
+        if latent_data is not None:
             self.data_transfer.release_latent_data(latent_data)
         self._drain_outstanding(outstanding)
         self.logger.info(f"VAE Encode Average FPS: {self._safe_mean(self.encode_fps_list):.4f}")
