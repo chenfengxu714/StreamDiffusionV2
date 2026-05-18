@@ -19,6 +19,7 @@
 StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time streaming applications. It scales across diverse GPU setups, supports flexible denoising steps, and delivers high FPS for creators and platforms. Further details are available on our project [homepage](https://streamdiffusionv2.github.io/).
 
 ## News
+- **[2026-05-17]** Added initial support for NVIDIA Blackwell GPUs.
 - **[2026-03-27]** StreamDiffusionV2 is now available on [PyPI](https://pypi.org/project/streamdiffusionv2/). Install the environment via `pip install streamdiffusionv2`.
 - **[2026-03-27]** Added optional TAEHV-VAE support for inference via `--use_taehv` and `USE_TAEHV=1`.
 - **[2026-03-06]** Update Ring-buffer KV Cache for efficient sliding window attention.
@@ -41,7 +42,7 @@ conda activate streamdiffusionv2
 # PyPI
 pip install streamdiffusionv2
 
-# Needed Blackwell GPUs
+# Needed for Blackwell GPUs
 pip install torch==2.11.0 torchvision==0.26.0
 
 # Optional but recommended for better throughput
