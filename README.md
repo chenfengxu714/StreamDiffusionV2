@@ -41,6 +41,9 @@ conda activate streamdiffusionv2
 # PyPI
 pip install streamdiffusionv2
 
+# Needed Blackwell GPUs
+pip install torch==2.11.0 torchvision==0.26.0
+
 # Optional but recommended for better throughput
 pip install "streamdiffusionv2[flash-attn]"
 ```
