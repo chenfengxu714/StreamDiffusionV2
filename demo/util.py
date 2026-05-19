@@ -50,7 +50,7 @@ def read_images_from_queue(queue, num_frames_needed, device, stop_event=None, re
         if stop_event and stop_event.is_set():
             wait_time = time.monotonic() - wait_start
             return (None, wait_time) if return_wait_time else None
-        time.sleep(0.01)
+        time.sleep(0.1)
     wait_time = time.monotonic() - wait_start
 
     # Read exactly num_frames_needed frames in order (FIFO), don't discard any frames.
