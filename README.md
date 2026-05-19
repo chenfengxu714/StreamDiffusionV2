@@ -1,4 +1,4 @@
-# StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation (MLSys 2026)
+# StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation (MLSys 2026 Best Paper)
 
 [Tianrui Feng](https://jerryfeng2003.github.io/)<sup>1</sup>, [Zhi Li](https://scholar.google.com/citations?user=C6kPjgwAAAAJ&hl)<sup>2</sup>, [Shuo Yang](https://andy-yang-1.github.io/)<sup>2</sup>, [Haocheng Xi](https://haochengxi.github.io/)<sup>2</sup>, [Muyang Li](https://lmxyy.me/)<sup>3</sup>, [Xiuyu Li](https://xiuyuli.com/)<sup>1</sup>, [Lvmin Zhang](https://lllyasviel.github.io/lvmin_zhang/)<sup>4</sup>, [Keting Yang](https://www.linkedin.com/in/kellyzpeng/)<sup>5</sup>, [Kelly Peng](https://www.linkedin.com/in/kellyzpeng/)<sup>6</sup>, [Song Han](https://hanlab.mit.edu/songhan)<sup>7</sup>, [Maneesh Agrawala](https://graphics.stanford.edu/~maneesh/)<sup>4</sup>, [Kurt Keutzer](https://people.eecs.berkeley.edu/~keutzer/)<sup>2</sup>, [Akio Kodaira](https://scholar.google.com/citations?hl=ja&user=15X3cioAAAAJ)<sup>8</sup>, [Chenfeng Xu](https://www.chenfengx.com/)<sup>†,1</sup>
 
@@ -19,6 +19,7 @@
 StreamDiffusionV2 is an open-source interactive diffusion pipeline for real-time streaming applications. It scales across diverse GPU setups, supports flexible denoising steps, and delivers high FPS for creators and platforms. Further details are available on our project [homepage](https://streamdiffusionv2.github.io/).
 
 ## News
+- **[2026-05-18]** 🎉🎉 [StreamDiffusionV2](https://arxiv.org/abs/2511.07399) receives the Best Research Paper Award at MLSys 2026!
 - **[2026-05-17]** Added initial support for NVIDIA Blackwell GPUs.
 - **[2026-03-27]** StreamDiffusionV2 is now available on [PyPI](https://pypi.org/project/streamdiffusionv2/). Install the environment via `pip install streamdiffusionv2`.
 - **[2026-03-27]** Added optional TAEHV-VAE support for inference via `--use_taehv` and `USE_TAEHV=1`.
