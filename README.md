@@ -316,7 +316,7 @@ If you find this repository useful in your research, please consider giving a st
 ```BibTeX
 @article{feng2025streamdiffusionv2,
   title={StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation},
-  author={Feng, Tianrui and Li, Zhi and Yang, Shuo and Xi, Haocheng and Li, Muyang and Li, Xiuyu and Zhang, Lvmin and Yang, Keting and Peng, Kelly and Han, Song and others},
+  author={Feng, Tianrui and Li, Zhi and Yang, Shuo and Xi, Haocheng and Li, Muyang and Li, Xiuyu and Zhang, Lvmin and Yang, Keting and Peng, Kelly and Han, Song and Agrawala, Maneesh and Keutzer, Kurt and Kodaira, Akio and Xu, Chenfeng},
   journal={arXiv preprint arXiv:2511.07399},
   year={2025}
 }
