@@ -460,12 +460,12 @@ class App:
         # route to setup frontend
         @self.app.get("/api/settings")
         async def settings():
-            info_schema = self.pipeline.Info.schema()
+            info_schema = self.pipeline.Info.model_json_schema()
             info = self.pipeline.Info()
             if info.page_content:
                 page_content = markdown2.markdown(info.page_content)
 
-            input_params = self.pipeline.InputParams.schema()
+            input_params = self.pipeline.InputParams.model_json_schema()
             return JSONResponse(
                 {
                     "info": info_schema,
