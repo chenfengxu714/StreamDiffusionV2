@@ -314,9 +314,9 @@ We also especially thank DayDream team for the great collaboration and incorpora
 
 If you find this repository useful in your research, please consider giving a star ⭐ or a citation.
 ```BibTeX
-@article{feng2026streamdiffusionv2,
-  title={StreamDiffusionV2: A streaming system for dynamic and interactive video generation},
-  author={Feng, Tianrui and Li, Zhi and Yang, Shuo and Xi, Haocheng and Li, Muyang and Li, Xiuyu and Zhang, Lvmin and Yang, Keting and Peng, Kelly and Han, Song and others},
+@article{streamdiffusionv2,
+  title={StreamDiffusionV2: A Streaming System for Dynamic and Interactive Video Generation},
+  author={Feng, Tianrui and Li, Zhi and Yang, Shuo and Xi, Haocheng and Li, Muyang and Li, Xiuyu and Zhang, Lvmin and Yang, Keting and Peng, Kelly and Han, Song and Agrawala, Maneesh and Keutzer, Kurt and Kodaira, Akio and Xu, Chenfeng},
   journal={Proceedings of Machine Learning and Systems},
   volume={8},
   pages={1656--1669},
