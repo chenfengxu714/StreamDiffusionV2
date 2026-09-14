@@ -92,6 +92,7 @@ class SLOAdaptiveSingleGPUInferencePipeline(StreamBatchInferencePipeline):
                     "v": entry["v"],
                     "global_end_index": entry["global_end_index"],
                     "local_end_index": entry["local_end_index"],
+                    "pos": entry.get("pos"),
                 }
                 for entry in self.pipeline.kv_cache1
             ],
@@ -120,6 +121,8 @@ class SLOAdaptiveSingleGPUInferencePipeline(StreamBatchInferencePipeline):
             entry["v"] = saved["v"][:1]
             entry["global_end_index"] = saved["global_end_index"][:1]
             entry["local_end_index"] = saved["local_end_index"][:1]
+            if saved["pos"] is not None:
+                entry["pos"] = saved["pos"][:1]
 
         for entry, saved in zip(self.pipeline.crossattn_cache, self._batch_state_refs["crossattn_cache"]):
             entry["k"] = saved["k"][:1]
@@ -158,6 +161,9 @@ class SLOAdaptiveSingleGPUInferencePipeline(StreamBatchInferencePipeline):
             self._copy_first_sequence_to_all(saved["v"])
             self._copy_first_sequence_to_all(saved["global_end_index"])
             self._copy_first_sequence_to_all(saved["local_end_index"])
+            if saved["pos"] is not None:
+                self._copy_first_sequence_to_all(saved["pos"])
+                entry["pos"] = saved["pos"]
             if "total_steps" in entry:
                 entry["current_step"] = entry["total_steps"]
             entry["k"] = saved["k"]

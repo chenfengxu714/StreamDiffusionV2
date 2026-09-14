@@ -188,6 +188,8 @@ class StreamDiffusionV2Pipeline:
         self.chunk_size = 4 * self.config.num_frame_per_block
         self.num_steps = len(self.pipeline_manager.pipeline.denoising_step_list)
         self._next_chunk_index = 0
+        self._stream_start = 0
+        self._stream_end = 0
 
     def close(self) -> None:
         self._resource_stack.close()
@@ -233,6 +235,8 @@ class StreamDiffusionV2Pipeline:
         self.pipeline_manager.reset_stream_state(reset_vae_flags=True)
         self.pipeline_manager.processed = 0
         self._next_chunk_index = 0
+        self._stream_start = 0
+        self._stream_end = 0
 
     def chunk_video(self, video: str | Path | torch.Tensor) -> list[VideoChunk]:
         """Split a full input video into the same chunks used by the offline inference loop."""
@@ -383,14 +387,22 @@ class StreamDiffusionV2Pipeline:
                     batch_denoise=False,
                 )
             self._next_chunk_index += 1
+            frame_seq_length = self.pipeline_manager.pipeline.frame_seq_length
+            self._stream_start = chunk.current_end
+            self._stream_end = chunk.current_end + (self.chunk_size // 4) * frame_seq_length
             return DenoisedChunk(denoised_pred=denoised_pred, last_frame_only=False)
 
-        current_start = chunk.current_start
-        current_end = chunk.current_end
-
-        if current_start // self.pipeline_manager.pipeline.frame_seq_length >= self.pipeline_manager.t_refresh:
-            current_start = self.pipeline_manager.pipeline.kv_cache_length - self.pipeline_manager.pipeline.frame_seq_length
-            current_end = current_start + (self.chunk_size // 4) * self.pipeline_manager.pipeline.frame_seq_length
+        # Keep a running RoPE position like the streaming sessions do: it advances by one block per
+        # chunk and wraps once t_refresh is reached. Deriving it from chunk.current_start instead
+        # would pin every chunk after the wrap to the same position.
+        frame_seq_length = self.pipeline_manager.pipeline.frame_seq_length
+        if self._stream_start // frame_seq_length >= self.pipeline_manager.t_refresh:
+            self._stream_start = self.pipeline_manager.pipeline.kv_cache_length - frame_seq_length
+            self._stream_end = self._stream_start + (self.chunk_size // 4) * frame_seq_length
+        current_start = self._stream_start
+        current_end = self._stream_end
+        self._stream_start = self._stream_end
+        self._stream_end = self._stream_end + (self.chunk_size // 4) * frame_seq_length
 
         if self.mode == "single":
             denoised_pred = self.pipeline_manager.pipeline.inference_stream(

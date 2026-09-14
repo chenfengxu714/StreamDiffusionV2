@@ -76,6 +76,11 @@ class KVCacheManager:
                 dist.broadcast(self.pipeline.kv_cache1[bi]['global_end_index'], src=donor_rank)
                 # Broadcast local end index
                 dist.broadcast(self.pipeline.kv_cache1[bi]['local_end_index'], src=donor_rank)
+                # Broadcast per-slot RoPE positions
+                if 'pos' in self.pipeline.kv_cache1[bi]:
+                    if self.pipeline.kv_cache1[bi]['pos'].device != self.device:
+                        self.pipeline.kv_cache1[bi]['pos'] = self.pipeline.kv_cache1[bi]['pos'].to(self.device)
+                    dist.broadcast(self.pipeline.kv_cache1[bi]['pos'], src=donor_rank)
                 
                 # Adjust global_end_index for the receiving rank
                 if donor_rank > rank:

@@ -4,6 +4,7 @@ from models import (
     get_vae_wrapper
 )
 from models.wan.taehv_wrapper import TAEHVWanVAEWrapper
+from models.wan.causal_model import KV_POS_EMPTY
 from typing import List
 import torch
 import torch.distributed as dist
@@ -100,6 +101,8 @@ class CausalStreamInferencePipeline(torch.nn.Module):
                 "v": torch.zeros([batch_size, cache_length, self.num_heads, 128], dtype=dtype, device=device),
                 "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
                 "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                # RoPE frame position stored in each cache slot (KV_POS_EMPTY = unused slot)
+                "pos": torch.full([batch_size, self.num_kv_cache], KV_POS_EMPTY, dtype=torch.long, device=device),
                 "total_steps": len(self.denoising_step_list),
                 "current_step": len(self.denoising_step_list),
             })
@@ -223,6 +226,7 @@ class CausalStreamInferencePipeline(torch.nn.Module):
 
             self.kv_cache1[i]['global_end_index'] = self.kv_cache1[i]['global_end_index'].repeat(self.batch_size)
             self.kv_cache1[i]['local_end_index'] = self.kv_cache1[i]['local_end_index'].repeat(self.batch_size)
+            self.kv_cache1[i]['pos'] = self.kv_cache1[i]['pos'].repeat(self.batch_size, 1)
 
             self.crossattn_cache[i]['k'] = self.crossattn_cache[i]['k'].expand(self.batch_size, -1, -1, -1)
             self.crossattn_cache[i]['v'] = self.crossattn_cache[i]['v'].expand(self.batch_size, -1, -1, -1)

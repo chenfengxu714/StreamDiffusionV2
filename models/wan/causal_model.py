@@ -108,6 +108,21 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0, rope_cache=None):
     return output
 
 
+KV_POS_EMPTY = -(1 << 30)  # sentinel for an unused KV-cache slot in kv_cache["pos"]
+
+
+def _shift_temporal_rope(k, freqs, delta):
+    """Move RoPE-encoded keys `k` ([L, N, D]) by `delta` frames along the temporal RoPE axis."""
+    c = k.shape[2] // 2
+    temporal = freqs[:, :c - 2 * (c // 3)]
+    rot = temporal[abs(delta)]
+    if delta < 0:
+        rot = rot.conj()
+    mult = torch.cat([rot, torch.ones(2 * (c // 3), dtype=rot.dtype, device=rot.device)])
+    x = torch.view_as_complex(k.to(torch.float64).reshape(k.shape[0], k.shape[1], -1, 2))
+    return torch.view_as_real(x * mult).flatten(2).type_as(k)
+
+
 def attention_with_kvcache_fallback(q, k_cache, v_cache, cache_seqlens):
     out_dtype = q.dtype
     max_seq_len = k_cache.shape[1]
@@ -185,6 +200,27 @@ class CausalWanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+    def _realign_kv_positions(self, kv_cache, i, new_pos, freqs, frame_seqlen):
+        """Re-rotate cached keys of sample `i` after the caller rewound the RoPE position to `new_pos`.
+
+        The original sink frames (positions 0..sink_size-1) stay where they are; every other filled
+        slot is shifted by a common offset so that the most recent cached frame lands at
+        `new_pos - 1`. The cache then looks like a freshly filled window again: sinks, the recent
+        frames in their original order, and the incoming frame right after them.
+        """
+        slot_pos = kv_cache["pos"]
+        positions = slot_pos[i].tolist()
+        movable = [s for s, p in enumerate(positions) if p != KV_POS_EMPTY and not (0 <= p < self.sink_size)]
+        if not movable:
+            return
+        delta = (new_pos - 1) - max(positions[s] for s in movable)
+        if delta == 0:
+            return
+        for s in movable:
+            start, end = s * frame_seqlen, (s + 1) * frame_seqlen
+            kv_cache["k"][i, start:end] = _shift_temporal_rope(kv_cache["k"][i, start:end], freqs, delta)
+            slot_pos[i, s] = positions[s] + delta
 
     def forward(
         self,
@@ -280,6 +316,18 @@ class CausalWanSelfAttention(nn.Module):
                 num_new_tokens = roped_query.shape[1]
                 current_end = c_start + roped_query.shape[1]
                 sink_tokens = self.sink_size * frame_seqlen
+
+                slot_pos = kv_cache.get("pos")
+                num_new_frames = num_new_tokens // frame_seqlen
+                new_pos = int(c_start) // frame_seqlen
+                if slot_pos is not None:
+                    # The streaming callers periodically rewind `current_start` (t_refresh) to keep
+                    # RoPE positions bounded. Cached keys were encoded at their old positions, so
+                    # re-rotate them to match; otherwise the cached recent frames would look like
+                    # the future to the incoming frame (ghosting / blur after the rewind).
+                    filled = slot_pos[i] != KV_POS_EMPTY
+                    if filled.any() and slot_pos[i][filled].max().item() - (new_pos + num_new_frames - 1) > 2 * slot_pos.shape[1]:
+                        self._realign_kv_positions(kv_cache, i, new_pos, freqs, frame_seqlen)
                 
                 if sink_tokens > 0 and self.adapt_sink_thr > -1 and v.shape[1] <= frame_seqlen:
                     # Caculate similarity between new keys/values and the oldest ones in the cache
@@ -320,6 +368,10 @@ class CausalWanSelfAttention(nn.Module):
                     # Newly added cache covers the oldest one
                     kv_cache["k"][i:i+1, target_end-num_new_tokens:target_end] = roped_key[i:i+1]
                     kv_cache["v"][i:i+1, target_end-num_new_tokens:target_end] = v[i:i+1]
+                    if slot_pos is not None:
+                        slot0 = (target_end - num_new_tokens) // frame_seqlen
+                        slot_pos[i, slot0:slot0 + num_new_frames] = torch.arange(
+                            new_pos, new_pos + num_new_frames, device=slot_pos.device)
 
                     local_end_index = kv_cache["local_end_index"][i].item()
 
@@ -335,6 +387,10 @@ class CausalWanSelfAttention(nn.Module):
                     # print(f"target: {local_start_index}:{local_end_index}")
                     kv_cache["k"][i:i+1, local_start_index:local_end_index] = roped_key[i:i+1]
                     kv_cache["v"][i:i+1, local_start_index:local_end_index] = v[i:i+1]
+                    if slot_pos is not None:
+                        slot0 = local_start_index // frame_seqlen
+                        slot_pos[i, slot0:slot0 + num_new_frames] = torch.arange(
+                            new_pos, new_pos + num_new_frames, device=slot_pos.device)
 
                 seq_lens.append(local_end_index)
 
