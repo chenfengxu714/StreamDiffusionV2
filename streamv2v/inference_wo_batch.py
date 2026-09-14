@@ -124,7 +124,7 @@ class SingleGPUInferencePipeline:
     def _timed_stream_encode(self, images: torch.Tensor) -> torch.Tensor:
         self._sync_for_timing()
         start_time = time.time()
-        latents = self.pipeline.vae.stream_encode(images)
+        latents = self.pipeline.vae.stream_encode(images, is_scale=bool(getattr(self.config, "normalize_latents", False)))
         self._sync_for_timing()
         self._record_stage_fps(self.encode_fps_list, int(images.shape[2]), time.time() - start_time)
         return latents
@@ -391,6 +391,7 @@ def main():
     parser.add_argument("--model_type", type=str, default="T2V-1.3B", help="Model type (e.g., T2V-1.3B)")
     parser.add_argument("--profile", action="store_true", default=False, help="Enable synchronized throughput logging")
     parser.add_argument("--use_taehv", action="store_true", default=False, help="Use the lightweight TAEHV VAE for encode/decode")
+    parser.add_argument("--normalize_latents", action="store_true", default=False, help="Normalize the encoded V2V latents with the VAE mean/std before denoising (fixes dark/color-shifted outputs; pair with a lower --noise_scale, e.g. 0.6)")
     parser.add_argument("--use_tensorrt", "--use_taehv_tensorrt", dest="use_tensorrt", action="store_true", default=False, help="Enable available TensorRT acceleration paths")
     parser.add_argument("--fast", action="store_true", default=False, help="Enable the fast path: --use_taehv --use_tensorrt")
     args = parser.parse_args()

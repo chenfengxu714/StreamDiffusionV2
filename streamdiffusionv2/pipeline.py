@@ -125,6 +125,7 @@ class StreamDiffusionV2Pipeline:
         use_tensorrt: bool = False,
         fast: bool = False,
         profile: bool = False,
+        normalize_latents: bool = False,
     ) -> None:
         if mode not in {"single", "single-wo"}:
             raise ValueError("StreamDiffusionV2Pipeline only supports 'single' and 'single-wo'")
@@ -173,6 +174,7 @@ class StreamDiffusionV2Pipeline:
             "target_fps": None,
             "fixed_noise_scale": False,
             "num_frames": 81,
+            "normalize_latents": bool(normalize_latents),
         }
         self.config = merge_cli_config(resolved_config_path, config_args)
 
