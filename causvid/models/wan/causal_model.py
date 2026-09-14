@@ -409,6 +409,9 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
 
+        self.repa_layer = -1 # -1 means no repa layer
+        self.repa_hidden_states = None
+
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
@@ -454,8 +457,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         self.num_frame_per_block = 1
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        self.gradient_checkpointing = value
+    def _set_gradient_checkpointing(self, module=None, value=False, enable=None, gradient_checkpointing_func=None):
+        # diffusers < 0.33 calls `(module, value)`; diffusers >= 0.33 calls
+        # `(enable=..., gradient_checkpointing_func=...)`. Support both.
+        self.gradient_checkpointing = value if enable is None else enable
 
     @staticmethod
     def _prepare_blockwise_causal_attn_mask(
@@ -744,6 +749,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 )
             else:
                 x = block(x, **kwargs)
+            if block_index == self.repa_layer:
+                self.repa_hidden_states = x.clone()
 
         # head
         x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))

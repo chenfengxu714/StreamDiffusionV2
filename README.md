@@ -88,12 +88,37 @@ Adjust `--nproc_per_node` to your GPU count. For different resolutions or FPS, c
 A minimal web demo is available under `demo/`. For setup and startup, please refer to [demo](demo/README.md).
 - Access in a browser after startup: `http://0.0.0.0:7860` or `http://localhost:7860`
 
+## Training
+
+Our training code is based on [CausVid](https://github.com/tianweiy/CausVid) and lives under `causvid/`. The training data is a text file with one caption per line; `train_distillation.py` additionally reads the video of each caption from `mixkit_videos/<first 100 characters of the caption>.mp4` (81 frames, 480×832) in the working directory.
+
+```shell
+# Step 1
+torchrun --nproc_per_node=8 causvid/models/wan/generate_ode_pairs.py \
+--caption_path data/captions.txt \
+--output_folder data/ode_pairs
+
+# Step 2
+python causvid/ode_data/create_lmdb_iterative.py \
+--data_path data/ode_pairs \
+--lmdb_path data/ode_lmdb
+
+# Step 3
+torchrun --nproc_per_node=8 causvid/train_ode.py \
+--config_path configs/wan_causal_ode.yaml
+
+# Step 4
+torchrun --nproc_per_node=8 causvid/train_distillation.py \
+--config_path configs/wan_causal_dmd.yaml
+```
+
+Set `data_path`, `output_path`, `generator_ckpt` (in `configs/wan_causal_dmd.yaml`, the `model.pt` from Step 3) and the `wandb_*` fields in the configs before launching (`wandb_mode: offline` needs no credentials). Checkpoints are saved to `<output_path>/<date>_seed<seed>/checkpoint_model_<step>/model.pt` and can be used with the inference scripts via `--checkpoint_folder`. The configs assume 8×80GB GPUs.
 
 ## To-do List
 
 - [x] Demo and inference pipeline.
 - [ ] Dynamic scheduler for various workload.
-- [ ] Training code.
+- [x] Training code.
 - [ ] FP8 support.
 - [ ] TensorRT support.
 

@@ -64,9 +64,10 @@ def init_logging_folder(args):
     os.makedirs(output_path, exist_ok=False)
 
     os.makedirs(args.output_path, exist_ok=True)
-    wandb.login(host=args.wandb_host, key=args.wandb_key)
     # Use wandb_mode from config, default to "online" if not specified
     wandb_mode = getattr(args, 'wandb_mode', 'online')
+    if wandb_mode == "online":  # offline/disabled runs do not need credentials
+        wandb.login(host=args.wandb_host, key=args.wandb_key)
     run = wandb.init(config=OmegaConf.to_container(args, resolve=True), dir=args.output_path, **
                      {"mode": wandb_mode, "entity": args.wandb_entity, "project": args.wandb_project})
     wandb.run.log_code(".")
