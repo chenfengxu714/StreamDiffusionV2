@@ -294,12 +294,15 @@ A minimal web demo is available under `demo/`. For setup and startup, please ref
 - Access in a browser after startup: `http://0.0.0.0:7860` or `http://localhost:7860`
 - To enable the TAEHV decoder in the web demo, start it with `USE_TAEHV=1`.
 
+## Training
+
+Our training code is based on [CausVid](https://github.com/tianweiy/CausVid) and is available on the [`user-study`](https://github.com/chenfengxu714/StreamDiffusionV2/tree/user-study) branch. See its [Training section](https://github.com/chenfengxu714/StreamDiffusionV2/tree/user-study#training) for usage.
 
 ## To-do List
 
 - [x] Demo and inference pipeline.
 - [ ] Dynamic scheduler for various workload.
-- [ ] Training code.
+- [x] Training code (see [Training](#training)).
 - [ ] FP8 support.
 - [ ] TensorRT support.
 
